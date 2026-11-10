@@ -1,0 +1,13 @@
+cam init=1 live=1 fps=30 frames=2952 | panel frames=5911 underruns=0 errs=0 | bl=100% camera live
+cam init=1 live=1 fps=30 frames=2982 | panel frames=5971 underruns=0 errs=0 | bl=100% camera live
+cam init=1 live=1 fps=30 frames=3013 | panel frames=6031 underruns=0 errs=0 | bl=100% camera live
+cam init=1 live=1 fps=30 frames=3043 | panel frames=6091 underruns=0 errs=0 | bl=100% camera live
+cam init=1 live=1 fps=30 frames=3073 | panel frames=6151 underruns=0 errs=0 | bl=100% camera live
+resolution      800 x 480 RGB565
+frame buffer   0x01800000 / 0x018BB800 (768000 bytes each)
+ctrl           0x0000FF00 (pattern=0 freeze=0 bl=255)
+status_cam     0x0C1D1E03 (init=1 live=1 fps=30 frames=3101)
+status_disp    0x0000183F (frames=6207 underruns=0 axi errs=0)
+
+cam init=1 live=1 fps=30 frames=3103 | panel frames=6213 underruns=0 errs=0 | bl=100% camera live
+cam init=1 live=1 fps=30 frames=3133 | panel frames=6273 underruns=0 errs=0 | bl=100% camera live
