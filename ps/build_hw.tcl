@@ -3,15 +3,15 @@
 #  preview PL top, then bitstream and XSA.  ACZ702 / XC7Z020-CLG400.
 #
 #  Run:  vivado -mode batch -source ps/build_hw.tcl
-#  Out:  ps/build_hw/ov5640_preview.runs/impl_1/design_1_wrapper.bit
-#        ps/ov5640_preview.xsa
+#  Out:  ps/build_hw/camera_pipeline.runs/impl_1/design_1_wrapper.bit
+#        ps/camera_pipeline.xsa
 # =============================================================================
 set here   [file normalize [file dirname [info script]]]
 set root   [file normalize [file join $here ..]]
 set rtl    [file join $root rtl]
 set constr [file join $root constr]
 
-create_project ov5640_preview [file join $here build_hw] -part xc7z020clg400-1 -force
+create_project camera_pipeline [file join $here build_hw] -part xc7z020clg400-1 -force
 
 add_files -norecurse [list \
     [file join $rtl ov5640_top.v] \
@@ -114,7 +114,7 @@ regenerate_bd_layout
 save_bd_design
 
 make_wrapper -files [get_files design_1.bd] -top
-set wrapper [glob [file join $here build_hw ov5640_preview.gen sources_1 bd design_1 hdl design_1_wrapper.v]]
+set wrapper [glob [file join $here build_hw camera_pipeline.gen sources_1 bd design_1 hdl design_1_wrapper.v]]
 add_files -norecurse $wrapper
 set_property top design_1_wrapper [current_fileset]
 add_files -fileset constrs_1 -norecurse [file join $constr ov5640.xdc]
@@ -147,7 +147,7 @@ set wns [get_property SLACK [get_timing_paths -delay_type max]]
 set whs [get_property SLACK [get_timing_paths -delay_type min]]
 puts "TIMING wns=$wns whs=$whs"
 
-write_hw_platform -fixed -include_bit -force [file join $here ov5640_preview.xsa]
-puts "BITSTREAM [file join $here build_hw ov5640_preview.runs impl_1 design_1_wrapper.bit]"
-puts "XSA [file join $here ov5640_preview.xsa]"
+write_hw_platform -fixed -include_bit -force [file join $here camera_pipeline.xsa]
+puts "BITSTREAM [file join $here build_hw camera_pipeline.runs impl_1 design_1_wrapper.bit]"
+puts "XSA [file join $here camera_pipeline.xsa]"
 close_project

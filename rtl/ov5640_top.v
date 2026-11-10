@@ -1,5 +1,5 @@
 // =============================================================================
-//  ov5640_top.v — ACZ702 OV5640 camera preview: camera -> DDR3 -> TFT/HDMI
+//  ov5640_top.v — ACZ702 camera pipeline: OV5640 -> DDR3 -> TFT/HDMI
 //
 //      OV5640 --DVP--> capture --> 64-bit FIFO --> DDR3 (2 frame buffers)
 //                                                      |   AXI4 master -> HP0

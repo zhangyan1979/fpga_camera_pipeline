@@ -1,5 +1,5 @@
 =============================================
- ACZ702 camera preview - OV5640 -> DDR3 -> TFT
+ ACZ702 camera pipeline - OV5640 -> DDR3 -> TFT
  800 x 480 RGB565, two frame buffers in DDR
 =============================================
 
@@ -11,9 +11,6 @@ console commands:
   h   this help
 
 OV5640 configured, waiting for the first frames...
-cam init=1 live=1 fps=27 frames=37 | panel frames=79 underruns=0 errs=0 | bl=100% camera live
-cam init=1 live=1 fps=30 frames=67 | panel frames=139 underruns=0 errs=0 | bl=100% camera live
-cam init=1 live=1 fps=30 frames=97 | panel frames=200 underruns=0 errs=0 | bl=100% camera live
-cam init=1 live=1 fps=30 frames=127 | panel frames=260 underruns=0 errs=0 | bl=100% camera live
-cam init=1 live=1 fps=30 frames=158 | panel frames=320 underruns=0 errs=0 | bl=100% camera live
-cam init=1 live=1 fps=30 frames=188 | panel frames=380 underruns=0 errs=0 | bl=100% camera live
+cam init=1 live=1 fps=26 frames=37 | panel frames=81 underruns=0 errs=0 | bl=100% camera live
+cam init=1 live=1 fps=30 frames=67 | panel frames=141 underruns=0 errs=0 | bl=100% camera live
+cam init=1 live=1 fps=30 frames=97 | panel frames=201 underruns=0 errs=0 | bl=100% camera live

@@ -1,5 +1,5 @@
 // =============================================================================
-//  main.c — ACZ702 OV5640 camera preview, PS side
+//  main.c — ACZ702 camera pipeline (OV5640 -> DDR3 -> TFT), PS side
 //
 //  The PL does all of the video work: OV5640 DVP capture -> tagged 64-bit pixel
 //  words -> DDR3 double buffer through S_AXI_HP0 -> 33.3 MHz RGB565 panel
@@ -191,7 +191,7 @@ int main(void)
 
     xil_printf("\r\n");
     xil_printf("=============================================\r\n");
-    xil_printf(" ACZ702 camera preview - OV5640 -> DDR3 -> TFT\r\n");
+    xil_printf(" ACZ702 camera pipeline - OV5640 -> DDR3 -> TFT\r\n");
     xil_printf(" %d x %d RGB565, two frame buffers in DDR\r\n", H_ACTIVE, V_ACTIVE);
     xil_printf("=============================================\r\n");
 

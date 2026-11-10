@@ -3,7 +3,7 @@
 #  synthesis result).  Used while iterating; build_hw.tcl is the real flow.
 # =============================================================================
 set here [file normalize [file dirname [info script]]]
-open_project [file join $here build_hw ov5640_preview.xpr]
+open_project [file join $here build_hw camera_pipeline.xpr]
 
 set_property STEPS.OPT_DESIGN.TCL.PRE [file join $here impl_pre.tcl] [get_runs impl_1]
 reset_run impl_1
@@ -21,7 +21,7 @@ if {[string first "write_bitstream Complete!" $st] >= 0} {
     set wns [get_property SLACK [get_timing_paths -delay_type max]]
     set whs [get_property SLACK [get_timing_paths -delay_type min]]
     puts "TIMING wns=$wns whs=$whs"
-    write_hw_platform -fixed -include_bit -force [file join $here ov5640_preview.xsa]
+    write_hw_platform -fixed -include_bit -force [file join $here camera_pipeline.xsa]
     puts "XSA written"
 }
 close_project

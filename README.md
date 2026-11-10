@@ -1,4 +1,4 @@
-# ACZ702 OV5640 camera preview — camera → DDR3 → 800×480 TFT
+# ACZ702 camera pipeline — OV5640 → DDR3 → 800×480 TFT
 
 Board: 芯路恒 ACZ702 (Zynq-7020, `xc7z020clg400-1`), OV5640 module on the DVP camera
 header, 4.3" 800×480 RGB TFT (WKS43189 class), Vivado / Vitis 2023.2.
@@ -9,11 +9,12 @@ configured over SCCB by the PL, its DVP output is packed into 64-bit words, two
 times them out to the panel at 1056×526 @ 33.333 MHz (60.0 Hz).  The PS supplies
 DDR3, the 50 MHz AXI clock and a control/status word pair — nothing else.
 
-![camera preview](docs/frame_boost.png)
+![camera pipeline](docs/frame_boost.png)
 
 *Live camera frame read back out of DDR3 over JTAG (`ps/dump_fb.tcl` + `tools/fb2png.py`).
-The camera was pointing at a dim, close surface, so this is the raw frame with a 3.2×
-gain and 0.65 gamma applied for viewing — `docs/frame.png` is the unmodified dump.*
+The camera sits a few centimetres from a tangle of cables on the desk, so the picture is
+an out-of-focus close-up; this is the raw dump with a 3.2× gain and 0.65 gamma applied
+because the room is dim — `docs/frame.png` is the unmodified dump.*
 
 ```
   OV5640 (DVP, 800x480 RGB565, PCLK ~42 MHz)
@@ -57,12 +58,12 @@ The panel shows the camera picture, 800×480, 60 Hz refresh from a ~30 fps camer
 running and fast when it is not.  The console reports:
 
 ```
- ACZ702 camera preview - OV5640 -> DDR3 -> TFT
+ ACZ702 camera pipeline - OV5640 -> DDR3 -> TFT
  800 x 480 RGB565, two frame buffers in DDR
  ...
 OV5640 configured, waiting for the first frames...
-cam init=1 live=1 fps=30 frames=37 | panel frames=79 underruns=0 errs=0 | bl=100% camera live
-cam init=1 live=1 fps=30 frames=67 | panel frames=139 underruns=0 errs=0 | bl=100% camera live
+cam init=1 live=1 fps=26 frames=37 | panel frames=81 underruns=0 errs=0 | bl=100% camera live
+cam init=1 live=1 fps=30 frames=67 | panel frames=141 underruns=0 errs=0 | bl=100% camera live
 ```
 
 | Key | Action |
@@ -100,6 +101,33 @@ AXI master can move 400 MB/s, and each burst is 16 beats (128 bytes), the maximu
 AXI3 burst the HP port accepts.  Bursts never cross a 4 KB boundary (768 000 =
 6000 × 128 bytes).
 
+## Adding image processing
+
+The project is named for the *pipeline* rather than the sensor: the video path is
+deliberately split so a processing stage has three clean insertion points.
+
+| Insertion point | Clock | Granularity | Use it for |
+|---|---|---|---|
+| between `u_capture` and `u_cam_fifo` (`ov5640_top.v`) | camera PCLK 42 MHz | one 64-bit word = 4 RGB565 pixels | line-buffered kernels: 3×3 Sobel / median / gaussian, colour balance |
+| inside `fb_ddr`, between the read burst and `disp_data` | AXI 50 MHz | 64-bit word stream out of DDR | per-word effects on the display side, and anything that must keep the stored frame raw |
+| inside `lcd_display`, before `lcd_rgb` | pixel 33.3 MHz | one pixel | cheap overlays (freeze marker, histogram, crosshair, test patterns) |
+
+Invariants a write-side stage must keep, otherwise the DDR engine's address
+counter drifts and the picture slides:
+
+* **96 000 words per frame** (800 × 480 / 4) and **200 words per line**;
+* the **frame tag (bit 64)** stays on the first word of every frame;
+* word alignment is **4 pixels**, restarted at every line and frame (the packer
+  does this; a filter that delays pixels must delay the tag by the same amount).
+
+For a mode switch, wire it to a reserved control bit (`ctrl[2]` … `ctrl[7]`) and
+report the active mode in a reserved status bit (`status_cam[7:2]`), then add a
+console key next to `p`/`f`/`b` in `ps/app/main.c`.
+
+Line-buffer budget at the camera rate: 4 pixels/cycle, 800 pixels/line = 200
+words/line, so a 3×3 kernel needs two line buffers (≈ 3 BRAM36) and about
+1 500 LUTs for three 8-bit channels.
+
 ## Clock domains
 
 | Domain | Source | Used by |
@@ -128,6 +156,7 @@ MMCM: VCO 1200 MHz (M = 24), CLKOUT0 /36, CLKOUT1 /50.
 | `ps/build_app.tcl` | Vitis platform, BSP, application build |
 | `ps/run_app.tcl` | JTAG download of bitstream + `ps7_init` + ELF |
 | `ps/dump_fb.tcl` | read a live frame buffer out over JTAG (proof without a screen capture) |
+| `ps/restart_app.tcl` | reset the PS and re-run the loaded application |
 | `ps/impl_pre.tcl` | implementation hook: CLOCK_DEDICATED_ROUTE waiver for the camera PCLK pin |
 | `ps/impl_iterate.tcl` | re-run place & route on the existing project (iteration helper) |
 | `ps/app/main.c` | status console and key commands |
@@ -143,7 +172,7 @@ MMCM: VCO 1200 MHz (M = 24), CLKOUT0 /36, CLKOUT1 /50.
 ## Build
 
 ```powershell
-cd D:\Programs\tests\fpga\ov5640_preview
+cd D:\Programs\tests\fpga\camera_pipeline
 
 # 1. bitstream + XSA  (prints "IMPL STATUS: ... write_bitstream Complete!")
 & D:\Xilinx\Vivado\2023.2\bin\vivado.bat -mode batch -source ps/build_hw.tcl `
@@ -165,6 +194,15 @@ powershell -File tools/serial_send.ps1 -Text "h" -ReadSeconds 2
 The panel lights up with the camera image within about a second of the ELF
 starting (the PL waits ~1.05 s before the SCCB writes, as the OV5640 needs its
 power-up delay).
+
+`ps/restart_app.tcl` resets the PS and re-runs the already loaded application
+(no bitstream, no ELF download) when only the software changed.  Every JTAG
+script starts by killing a stale `hw_server`: a server left over from an earlier
+session keeps a dead handle on the cable and silently ignores every command.
+
+```powershell
+& D:\Xilinx\Vitis\2023.2\bin\xsct.bat ps/restart_app.tcl
+```
 
 Frame-buffer proof (no camera or monitor capture needed):
 
@@ -230,10 +268,10 @@ id, and there were no underruns and no AXI errors.  The DDR dump line shows
 ### On the board
 
 ```
-cam init=1 live=1 fps=30 frames=37   | panel frames=79   underruns=0 errs=0 | bl=100% camera live
-cam init=1 live=1 fps=30 frames=127  | panel frames=260  underruns=0 errs=0 | bl=100% camera live
-cam init=1 live=1 fps=30 frames=2952 | panel frames=5911 underruns=0 errs=0 | bl=100% camera live
-cam init=1 live=1 fps=30 frames=3043 | panel frames=6091 underruns=0 errs=0 | bl=100% camera live
+cam init=1 live=1 fps=26 frames=37   | panel frames=81   underruns=0 errs=0 | bl=100% camera live
+cam init=1 live=1 fps=30 frames=127  | panel frames=261  underruns=0 errs=0 | bl=100% camera live
+cam init=1 live=1 fps=30 frames=368  | panel frames=742  underruns=0 errs=0 | bl=100% camera live
+cam init=1 live=1 fps=30 frames=2455 | panel frames=7009 underruns=0 errs=0 | bl=30%  camera live
 ```
 
 | Check | Result |
@@ -243,14 +281,14 @@ cam init=1 live=1 fps=30 frames=3043 | panel frames=6091 underruns=0 errs=0 | bl
 | AXI | **0 error responses** on the HP0 path |
 | Live picture | two frame-buffer dumps 1.2 s apart differ (`identical frames: False`) |
 | Freeze (`f`) | two dumps 1.2 s apart are **byte identical** (`identical frames: True`) |
-| Frame content | both buffers hold real 2-D image data (`row_delta` ≈ 77, i.e. rows differ) |
+| Frame content | both buffers hold real 2-D image data (`row_delta` ≈ 85, i.e. rows differ) |
 | Backlight (`b`) | duty cycles 255 → 153 → 77 → 26 and back, visible on the panel |
 | Test pattern (`p`) | 8 colour bars + white frame on the panel instead of the camera |
 
-The picture during verification was a dim, out-of-focus close-up (the camera was
-lying on a desk pointing at a surface a few centimetres away), so the raw frame
-`docs/frame.png` looks almost black; `docs/frame_boost.png` is the *same* dump with
-a 3.2× gain and 0.65 gamma purely to make it viewable.
+The camera was lying on the desk a few centimetres from a tangle of cables, so the
+picture is an out-of-focus close-up and the room is dim: `docs/frame.png` is the raw
+dump, `docs/frame_boost.png` the *same* dump with a 3.2× gain and 0.65 gamma purely to
+make it easier to look at.
 
 ## Design notes
 
