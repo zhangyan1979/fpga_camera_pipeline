@@ -1,246 +1,148 @@
-/////////////////////////////////////////////////////////////////////////////////
-// Company       : 武汉芯路恒科技有限公司
-//                 http://xiaomeige.taobao.com
-// Web           : http://www.corecourse.cn
-// 
-// Create Date   : 2019/05/01 00:00:00
-// Module Name   : i2c_control
-// Description   : I2C控制器顶层文件
-// 
-// Dependencies  : 
-// 
-// Revision:
-// Revision 0.01 - File Created
-// Additional Comments:
-// 
-/////////////////////////////////////////////////////////////////////////////////
+// =============================================================================
+//  i2c_control.v — SCCB register write sequencer
+//
+//  Turns one "write this register" request into the byte sequence every camera
+//  and HDMI transmitter on this board understands:
+//
+//      addr_mode = 1 (OV5640)   device id, addr[15:8], addr[7:0], data
+//      addr_mode = 0 (SiI9022A) device id, addr[7:0],  data
+//
+//  START goes out with the device id, STOP with the data byte.  ack reports
+//  whether any byte of the sequence was NACKed, and dly_max adds a wait of that
+//  many clocks after the sequence (the OV5640 needs 5 ms after its software
+//  reset).  Only the write direction is implemented; nothing on this board is
+//  ever read back over SCCB.
+// =============================================================================
+`timescale 1ns / 1ps
 
 module i2c_control #(
-  //系统时钟采用50MHz
-  parameter SYS_CLOCK = 50_000_000,
-  //SCL总线时钟采用400kHz
-  parameter SCL_CLOCK = 400_000
-)
-(
-  input            Clk,
-  input            Rst_n,
-
-  input            wrreg_req,
-  input            rdreg_req,
-  input     [15:0] addr,
-  input            addr_mode,
-  input     [7:0]  wrdata,
-  output reg[7:0]  rddata,
-  input     [7:0]  device_id,
-  output reg       RW_Done,
-
-  output reg       ack,
-
-  input     [31:0] dly_cnt_max,
-  output           i2c_sclk,
-  inout            i2c_sdat
+    parameter integer SYS_CLOCK = 50_000_000,
+    parameter integer SCL_CLOCK = 400_000
+) (
+    input  wire        clk,
+    input  wire        rst_n,
+    input  wire        wr_req,      // one-cycle request
+    input  wire [15:0] addr,        // register address (8 or 16 bits)
+    input  wire        addr_mode,   // 1 = 16-bit register address
+    input  wire [ 7:0] wr_data,
+    input  wire [ 7:0] dev_id,
+    output reg         wr_done,     // one-cycle pulse: sequence finished
+    output reg         ack,         // 1 = at least one byte was NACKed
+    input  wire [31:0] dly_max,     // extra wait after the sequence, in clocks
+    output wire        i2c_sclk,
+    inout  wire        i2c_sdat
 );
 
-  reg [5:0]Cmd;
-  reg [7:0]Tx_DATA;
-  wire Trans_Done;
-  wire ack_o;
-  reg Go;
-  wire [15:0] reg_addr;
+    localparam [5:0] CMD_WR  = 6'b000001,
+                     CMD_STA = 6'b000010,
+                     CMD_STO = 6'b001000;
 
-  assign reg_addr = addr_mode?addr:{addr[7:0],addr[15:8]};
+    localparam [1:0] S_IDLE = 2'd0,
+                     S_SEND = 2'd1,
+                     S_WAIT = 2'd2,
+                     S_DLY  = 2'd3;
 
-  wire [7:0]Rx_DATA;
+    reg [1:0]  st;
+    reg [1:0]  byte_idx;
+    reg [5:0]  cmd;
+    reg [ 7:0] tx_data;
+    reg        go;
+    reg [31:0] dly_cnt;
 
-  localparam 
-    WR   = 6'b000001,   //写请求
-    STA  = 6'b000010,   //起始位请求
-    RD   = 6'b000100,   //读请求
-    STO  = 6'b001000,   //停止位请求
-    ACK  = 6'b010000,   //应答位请求
-    NACK = 6'b100000;   //无应答请求
+    wire trans_done;
+    wire ack_o;
 
-  i2c_bit_shift #(
-    .SYS_CLOCK (SYS_CLOCK ),
-    .SCL_CLOCK (SCL_CLOCK )
-  )i2c_bit_shift(
-    .Clk       (Clk        ),
-    .Rst_n     (Rst_n      ),
-    .Cmd       (Cmd        ),
-    .Go        (Go         ),
-    .Rx_DATA   (Rx_DATA    ),
-    .Tx_DATA   (Tx_DATA    ),
-    .Trans_Done(Trans_Done ),
-    .ack_o     (ack_o      ),
-    .i2c_sclk  (i2c_sclk   ),
-    .i2c_sdat  (i2c_sdat   )
-  );
+    wire [1:0] byte_last = addr_mode ? 2'd3 : 2'd2;
+    wire       last_byte = (byte_idx == byte_last);
 
-  reg [7:0]state;
-  reg [7:0]cnt;
-  reg [31:0]dly_cnt;
-	
-  localparam
-    IDLE         = 8'b0000_0001,   //空闲状态
-    WR_REG       = 8'b0000_0010,   //写寄存器状态
-    WAIT_WR_DONE = 8'b0000_0100,   //等待写寄存器完成状态
-    WR_REG_DONE  = 8'b0000_1000,   //写寄存器完成状态
-    RD_REG       = 8'b0001_0000,   //读寄存器状态
-    WAIT_RD_DONE = 8'b0010_0000,   //等待读寄存器完成状态
-    RD_REG_DONE  = 8'b0100_0000,   //读寄存器完成状态
-    WAIT_DLY     = 8'b1000_0000;   //等带读写完成后延迟完成
-  always@(posedge Clk or negedge Rst_n)
-  if(!Rst_n)begin
-    Cmd <= 6'd0;
-    Tx_DATA <= 8'd0;
-    Go <= 1'b0;
-    rddata <= 0;
-    state <= IDLE;
-    ack <= 0;
-    dly_cnt <= 0;
-    cnt <= 0;
-  end
-  else begin
-    case(state)
-      IDLE:
-        begin
-          cnt <= 0;
-          dly_cnt <= 0;
-          ack <= 0;
-          RW_Done <= 1'b0;
-          if(wrreg_req)
-            state <= WR_REG;
-          else if(rdreg_req)
-            state <= RD_REG;
-          else
-            state <= IDLE;
-        end
-
-      WR_REG:
-        begin
-          state <= WAIT_WR_DONE;
-          case(cnt)
-            0:write_byte(WR | STA, device_id);
-            1:write_byte(WR, reg_addr[15:8]);
-            2:write_byte(WR, reg_addr[7:0]);
-            3:write_byte(WR | STO, wrdata);
-            default:;
-          endcase
-        end
-
-      WAIT_WR_DONE:
-        begin
-          Go <= 1'b0; 
-          if(Trans_Done)begin
-            ack <= ack | ack_o;
-            case(cnt)
-              0: begin cnt <= 1; state <= WR_REG;end
-              1: 
-                begin 
-                  state <= WR_REG;
-                  if(addr_mode)
-                    cnt <= 2; 
-                  else
-                    cnt <= 3;
-                end
-
-              2: begin
-                  cnt <= 3;
-                  state <= WR_REG;
-                end
-              3:state <= WR_REG_DONE;
-              default:state <= IDLE;
-            endcase
-          end
-        end
-
-      WR_REG_DONE:
-        begin
-//          RW_Done <= 1'b1;
-          state <= WAIT_DLY;
-        end
-
-      RD_REG:
-        begin
-          state <= WAIT_RD_DONE;
-          case(cnt)
-            0:write_byte(WR | STA, device_id);
-            1:write_byte(WR, reg_addr[15:8]);
-            2:write_byte(WR, reg_addr[7:0]);
-            3:write_byte(WR | STA, device_id | 8'd1);
-            4:read_byte(RD | NACK | STO);
-            default:;
-          endcase
-        end
-
-      WAIT_RD_DONE:
-        begin
-          Go <= 1'b0; 
-          if(Trans_Done)begin
-            if(cnt <= 3)
-              ack <= ack | ack_o;
-            case(cnt)
-              0: begin cnt <= 1; state <= RD_REG;end
-              1: 
-                begin 
-                  state <= RD_REG;
-                  if(addr_mode)
-                    cnt <= 2; 
-                  else
-                    cnt <= 3;
-                end
-              2: begin
-                  cnt <= 3;
-                  state <= RD_REG;
-                end
-              3:begin
-                  cnt <= 4;
-                  state <= RD_REG;
-                end
-              4:state <= RD_REG_DONE;
-              default:state <= IDLE;
-            endcase
-          end
-        end
-
-      RD_REG_DONE:
-        begin
-//          RW_Done <= 1'b1;
-          rddata <= Rx_DATA;
-          state <= WAIT_DLY;
-        end
-      default:state <= IDLE;
-      WAIT_DLY:
-        begin
-          if(dly_cnt <= dly_cnt_max) begin
-            dly_cnt <= dly_cnt + 1'b1;
-            state <= WAIT_DLY;
-          end
-         else begin
-           dly_cnt <= 0;
-           RW_Done <= 1'b1;
-           state <= IDLE;
-         end
-       end
-    endcase
-  end
-
-  task read_byte;
-    input [5:0]Ctrl_Cmd;
-    begin
-      Cmd <= Ctrl_Cmd;
-      Go <= 1'b1; 
+    // ---- byte source: device id, register address, register data ------------
+    reg [7:0] byte_data;
+    always @(*) begin
+        case (byte_idx)
+        2'd0:    byte_data = dev_id;
+        2'd1:    byte_data = addr_mode ? addr[15:8] : addr[7:0];
+        2'd2:    byte_data = addr_mode ? addr[7:0]  : wr_data;
+        default: byte_data = wr_data;
+        endcase
     end
-  endtask
 
-  task write_byte;
-    input [5:0]Ctrl_Cmd;
-    input [7:0]Wr_Byte_Data;
-    begin
-      Cmd <= Ctrl_Cmd;
-      Tx_DATA <= Wr_Byte_Data;
-      Go <= 1'b1; 
+    // START on the first byte, STOP on the last one
+    wire [5:0] byte_cmd = CMD_WR |
+                          ((byte_idx == 2'd0) ? CMD_STA : 6'd0) |
+                          (last_byte          ? CMD_STO : 6'd0);
+
+    i2c_bit_shift #(
+        .SYS_CLOCK(SYS_CLOCK),
+        .SCL_CLOCK(SCL_CLOCK)
+    ) u_i2c_bit_shift (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .cmd       (cmd),
+        .go        (go),
+        .tx_data   (tx_data),
+        .trans_done(trans_done),
+        .ack_o     (ack_o),
+        .i2c_sclk  (i2c_sclk),
+        .i2c_sdat  (i2c_sdat)
+    );
+
+    // ---- sequencer ----------------------------------------------------------
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            st       <= S_IDLE;
+            byte_idx <= 2'd0;
+            cmd      <= 6'd0;
+            tx_data  <= 8'd0;
+            go       <= 1'b0;
+            wr_done  <= 1'b0;
+            ack      <= 1'b0;
+            dly_cnt  <= 32'd0;
+        end else begin
+            case (st)
+            S_IDLE: begin
+                go      <= 1'b0;
+                wr_done <= 1'b0;
+                ack     <= 1'b0;
+                if (wr_req) begin
+                    byte_idx <= 2'd0;
+                    st       <= S_SEND;
+                end
+            end
+
+            S_SEND: begin
+                cmd     <= byte_cmd;
+                tx_data <= byte_data;
+                go      <= 1'b1;
+                st      <= S_WAIT;
+            end
+
+            S_WAIT: begin
+                go <= 1'b0;
+                if (trans_done) begin
+                    ack <= ack | ack_o;
+                    if (last_byte) begin
+                        dly_cnt <= 32'd0;
+                        st      <= S_DLY;
+                    end else begin
+                        byte_idx <= byte_idx + 2'd1;
+                        st       <= S_SEND;
+                    end
+                end
+            end
+
+            S_DLY: begin
+                if (dly_cnt <= dly_max) begin
+                    dly_cnt <= dly_cnt + 32'd1;
+                end else begin
+                    dly_cnt <= 32'd0;
+                    wr_done <= 1'b1;
+                    st      <= S_IDLE;
+                end
+            end
+
+            default: st <= S_IDLE;
+            endcase
+        end
     end
-  endtask
 
 endmodule

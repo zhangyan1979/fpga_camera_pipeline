@@ -1,20 +1,19 @@
 // =============================================================================
 //  fb_ddr.v — DDR3 frame buffer engine (AXI4 master -> PS S_AXI_HP0)
 //
-//  Two double-buffered 800x480 RGB565 frame stores live in DDR:
+//  Two 800x480 RGB565 frame stores live in DDR:
 //
-//      0x0180_0000  buffer 0   768 000 bytes
-//      0x018B_B800  buffer 1   768 000 bytes
+//      FB_BASE            buffer 0   768 000 bytes
+//      FB_BASE + FB_BYTES buffer 1   768 000 bytes
 //
 //  WRITE  camera word stream -> DDR.  The camera fills buffer A while the panel
 //         reads buffer B and vice versa.  Bit 64 of every FIFO word is the
-//         "first word of a frame" tag inserted by ov5640_capture: when it
-//         reaches the head of the FIFO the engine switches to the other buffer,
-//         resets its burst counter and starts writing at offset 0, then writes
-//         exactly 6000 bursts (96 000 words).  Any words beyond that, or any
-//         words arriving while frozen, are dropped.  Because the tag travels
-//         with the data there is no clock-domain timing race around the frame
-//         boundary.
+//         "first word of a frame" tag inserted by ov5640_capture: when it reaches
+//         the head of the FIFO the engine switches to the other buffer, resets
+//         its burst counter and starts writing at offset 0, then writes exactly
+//         BURSTS_PER_FRAME bursts (96 000 words).  Words beyond that, or words
+//         arriving while frozen, are dropped.  Because the tag travels with the
+//         data there is no clock-domain timing race at the frame boundary.
 //
 //  READ   DDR -> display word stream.  The panel asks for a reload once per
 //         display frame at the start of vertical blanking (rel_req).  The engine
@@ -25,24 +24,22 @@
 //         the ~1.4 ms blanking interval, so the buffer switch is atomic and the
 //         picture never tears.
 //
-//  Both engines share one AXI4 master and alternate 128-byte bursts (16 beats
-//  of 64 bits), the maximum AXI3 burst the HP port accepts.
-//
-//  AXI clock = 50 MHz (PS FCLK0): 400 MB/s of headroom for the ~70 MB/s the
-//  video path actually needs.
+//  Both engines share one AXI4 master and alternate 128-byte bursts (16 beats of
+//  64 bits), the maximum AXI3 burst the HP port accepts.  AXI clock = 50 MHz
+//  (PS FCLK0): 400 MB/s of headroom for the ~70 MB/s the video path needs.
 // =============================================================================
 `timescale 1ns / 1ps
 
 module fb_ddr #(
-    parameter [31:0] FB_BASE    = 32'h0180_0000,
-    parameter integer H_ACTIVE  = 800,
-    parameter integer V_ACTIVE  = 480,
-    parameter integer BEATS     = 16,            // 16 x 8 bytes = 128 bytes
-    parameter integer CAM_LEVEL = 24,            // start a write burst at this occupancy
-    parameter integer DISP_LEVEL= 32             // keep the display FIFO at or below this
+    parameter [31:0]  FB_BASE    = 32'h0180_0000,
+    parameter integer H_ACTIVE   = 800,
+    parameter integer V_ACTIVE   = 480,
+    parameter integer BEATS      = 16,          // 16 x 8 bytes = 128 bytes
+    parameter integer CAM_LEVEL  = 24,          // start a write burst at this occupancy
+    parameter integer DISP_LEVEL = 32           // keep the display FIFO at or below this
 ) (
     input  wire        clk,             // AXI clock, 50 MHz (PS FCLK0)
-    input  wire        rstn,            // asynchronous, active low
+    input  wire        rst_n,           // asynchronous, active low
     // AXI4 master
     output wire [ 3:0] m_axi_awid,
     output reg  [31:0] m_axi_awaddr,
@@ -61,7 +58,6 @@ module fb_ddr #(
     output wire        m_axi_wlast,
     output wire        m_axi_wvalid,
     input  wire        m_axi_wready,
-    input  wire [ 3:0] m_axi_bid,
     input  wire [ 1:0] m_axi_bresp,
     input  wire        m_axi_bvalid,
     output wire        m_axi_bready,
@@ -77,7 +73,6 @@ module fb_ddr #(
     output wire [ 3:0] m_axi_arregion,
     output reg         m_axi_arvalid,
     input  wire        m_axi_arready,
-    input  wire [ 3:0] m_axi_rid,
     input  wire [63:0] m_axi_rdata,
     input  wire [ 1:0] m_axi_rresp,
     input  wire        m_axi_rlast,
@@ -102,20 +97,23 @@ module fb_ddr #(
     output reg         frame_seen,      // at least one camera frame is in DDR
     output reg  [15:0] cam_frames,      // camera frames seen (AXI clock domain)
     output reg  [ 7:0] axi_errs,        // saturating
-    output reg         frame_new        // 1-cycle pulse per camera frame
+    output reg         frame_new        // one-cycle pulse per camera frame
 );
 
+    // ---- frame geometry -----------------------------------------------------
     localparam integer WORDS_PER_FRAME  = (H_ACTIVE * V_ACTIVE) / 4;   // 96 000
     localparam integer BURSTS_PER_FRAME = WORDS_PER_FRAME / BEATS;     // 6 000
     localparam integer FB_BYTES         = H_ACTIVE * V_ACTIVE * 2;     // 768 000
     localparam [31:0]  FB_BASE_1        = FB_BASE + FB_BYTES;
 
-    localparam [2:0] W_IDLE    = 3'd0,
-                     W_TAG     = 3'd1,
-                     W_ADDR    = 3'd2,
-                     W_DATA    = 3'd3,
-                     W_RESP    = 3'd4;
+    // ---- write engine -------------------------------------------------------
+    localparam [2:0] W_IDLE = 3'd0,
+                     W_TAG  = 3'd1,
+                     W_ADDR = 3'd2,
+                     W_DATA = 3'd3,
+                     W_RESP = 3'd4;
 
+    // ---- read engine --------------------------------------------------------
     localparam [1:0] R_IDLE = 2'd0,
                      R_ADDR = 2'd1,
                      R_DATA = 2'd2;
@@ -127,7 +125,7 @@ module fb_ddr #(
     reg         wr_err_pulse, rd_err_pulse;
     wire [31:0] wr_base = wr_buf ? FB_BASE_1 : FB_BASE;
 
-    // ---- AXI constant attributes -------------------------------------------
+    // ---- AXI constant attributes --------------------------------------------
     assign m_axi_awid     = 4'd0;
     assign m_axi_awlen    = BEATS - 1;
     assign m_axi_awsize   = 3'd3;              // 8 bytes per beat
@@ -160,7 +158,7 @@ module fb_ddr #(
 
     wire cam_tag = cam_data[64];
 
-    // beats take the word at the head of the show-ahead FIFO, so the data being
+    // a beat takes the word at the head of the show-ahead FIFO, so the data being
     // written is always the word being popped
     assign m_axi_wdata  = cam_data[63:0];
     assign m_axi_wvalid = (w_state == W_DATA) && !cam_empty;
@@ -171,8 +169,8 @@ module fb_ddr #(
                      ((w_state == W_IDLE) && !cam_empty &&
                       (freeze || (w_frame_done && !cam_tag)));
 
-    always @(posedge clk or negedge rstn) begin
-        if (!rstn) begin
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
             w_state       <= W_IDLE;
             w_beat        <= 5'd0;
             w_bursts      <= 13'd0;
@@ -199,9 +197,9 @@ module fb_ddr #(
                     // the frame the panel is reading stays untouched
                     w_frame_done <= 1'b1;      // after unfreezing, wait for a tag
                 end else if (cam_tag) begin
-                    // a new frame starts here.  The first tag only arms the
-                    // engine (frame 0 still goes to buffer 0); from the second
-                    // tag on, the buffer that just finished becomes readable.
+                    // a new frame starts here.  The first tag only arms the engine
+                    // (frame 0 still goes to buffer 0); from the second tag on, the
+                    // buffer that just finished becomes readable.
                     if (!first_tag) begin
                         rd_candidate <= wr_buf;
                         wr_buf       <= ~wr_buf;
@@ -225,7 +223,7 @@ module fb_ddr #(
             W_TAG: begin
                 // wr_base has settled; the tagged word is still at the FIFO head
                 if (freeze) begin
-                    w_state <= W_IDLE;       // drain instead of starting a frame
+                    w_state <= W_IDLE;         // drain instead of starting a frame
                 end else if (cam_level >= CAM_LEVEL) begin
                     m_axi_awaddr  <= wr_base + ({{19{1'b0}}, w_bursts} << 7);
                     m_axi_awvalid <= 1'b1;
@@ -279,8 +277,8 @@ module fb_ddr #(
     reg [31:0] rd_base;
     reg        rel_s1, rel_s2;
 
-    always @(posedge clk or negedge rstn) begin
-        if (!rstn) begin
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
             rel_s1 <= 1'b0;
             rel_s2 <= 1'b0;
         end else begin
@@ -293,8 +291,8 @@ module fb_ddr #(
     // the panel has finished draining and dropped rel_req
     wire rel_pending = rel_s2 && !rel_ack;
 
-    always @(posedge clk or negedge rstn) begin
-        if (!rstn) begin
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
             r_state       <= R_IDLE;
             r_beat        <= 5'd0;
             r_bursts      <= 13'd0;
@@ -361,8 +359,8 @@ module fb_ddr #(
     end
 
     // both error pulses fold into one saturating counter
-    always @(posedge clk or negedge rstn) begin
-        if (!rstn)
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
             axi_errs <= 8'd0;
         else if ((wr_err_pulse || rd_err_pulse) && axi_errs != 8'hFF)
             axi_errs <= axi_errs + 8'd1;

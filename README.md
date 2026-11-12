@@ -24,7 +24,7 @@ because the room is dim — `docs/frame.png` is the unmodified dump.*
   ov5640_capture    byte pairing, 800x480 clipping, 4 pixels/64-bit word,
      |              tag bit = "first word of a frame"
      v
-  afifo64 (65 bit)  dual-clock, show-ahead, Gray pointers       <-- CDC #1
+  afifo (65 bit)    dual-clock, show-ahead, Gray pointers       <-- CDC #1
      |
      |  clk50 (PS FCLK0) domain
      v
@@ -32,7 +32,7 @@ because the room is dim — `docs/frame.png` is the unmodified dump.*
      |               write: buffer A while the panel reads B, tag-driven switch
      |               read:  retargeted only in vertical blanking, no tearing
      v
-  afifo64 (64 bit)  dual-clock                                  <-- CDC #2
+  afifo (64 bit)    dual-clock                                  <-- CDC #2
      |
      |  33.333 MHz pixel domain
      v
@@ -145,12 +145,12 @@ MMCM: VCO 1200 MHz (M = 24), CLKOUT0 /36, CLKOUT1 /50.
 |---|---|
 | `rtl/ov5640_top.v` | top: resets, clocks, control/status words, backlight PWM, LED, HDMI init |
 | `rtl/ov5640_capture.v` | DVP byte pairing, 800×480 clipping, 4-pixel packer, frame tag |
-| `rtl/afifo64.v` | 65/64-bit dual-clock show-ahead FIFO (Gray pointers) |
+| `rtl/afifo.v` | parameterised dual-clock show-ahead FIFO (Gray pointers), 64/65-bit use |
 | `rtl/fb_ddr.v` | AXI4 master: tag-driven DDR write engine + blanking-time read engine |
 | `rtl/lcd_display.v` | 1056×526 timing, RGB565 output, reload handshake, underrun counter |
 | `rtl/clk_gen.v` | MMCM 33.333 MHz + 24 MHz |
-| `rtl/camera_init.v`, `rtl/i2c_control.v`, `rtl/i2c_bit_shift.v`, `rtl/ov5640_init_table_rgb.v` | OV5640 SCCB bring-up (vendor reference design, see Provenance) |
-| `rtl/sii9022_init.v`, `rtl/sii9022_init_table.v` | HDMI transmitter set-up on the PL I2C bus |
+| `rtl/ov5640_init.v`, `rtl/i2c_control.v`, `rtl/i2c_bit_shift.v`, `rtl/ov5640_init_table_rgb.v` | OV5640 SCCB bring-up: 21 ms power-up wait, 252-entry write sequence, 5 ms post-reset delay (see Provenance) |
+| `rtl/sii9022_init.v`, `rtl/sii9022_init_table.v` | HDMI transmitter set-up on the PL I2C bus (write-only, 8-bit register address) |
 | `constr/ov5640.xdc` | camera header, panel, LED, backlight, HDMI I2C, clock constraints |
 | `ps/build_hw.tcl` | block design (PS7 + HP0 + 2 AXI GPIO + SmartConnect + PL top), bitstream, XSA |
 | `ps/build_app.tcl` | Vitis platform, BSP, application build |
@@ -162,7 +162,9 @@ MMCM: VCO 1200 MHz (M = 24), CLKOUT0 /36, CLKOUT1 /50.
 | `ps/app/main.c` | status console and key commands |
 | `sim/tb_pipeline.v` | self-checking end-to-end video test (reduced geometry + AXI memory model) |
 | `sim/tb_lcd_timing.v` | full-size panel timing check |
-| `sim/run_sim.ps1` | rebuild and run both simulations |
+| `sim/tb_sccb.v` | SCCB write-path check: byte sequence, ACK/NACK, delay, SCL rate |
+| `sim/tb_init_seq.v` | register-load check: every byte of both ROM sequences compared with the table |
+| `sim/run_sim.ps1` | rebuild and run all four simulations |
 | `tools/fb2png.py` | RGB565 DDR dump → PNG |
 | `tools/serial_send.ps1`, `tools/serial_capture.ps1` | drive / record the console |
 | `tools/verify.ps1` | hardware self-check: live-frame and freeze tests |
@@ -191,9 +193,10 @@ Leave the boot-mode switch on **JTAG**, open COM3 (CH343P) at 115200 8N1, then:
 powershell -File tools/serial_send.ps1 -Text "h" -ReadSeconds 2
 ```
 
-The panel lights up with the camera image within about a second of the ELF
-starting (the PL waits ~1.05 s before the SCCB writes, as the OV5640 needs its
-power-up delay).
+The panel shows the camera image about 50 ms after the ELF starts: `ov5640_init`
+waits 21 ms for the sensor's power-up and then writes the 252 registers over
+SCCB (~28 ms at 400 kHz, including the 5 ms pause after the software reset).  The
+HDMI transmitter is programmed one second later.
 
 `ps/restart_app.tcl` resets the PS and re-runs the already loaded application
 (no bitstream, no ELF download) when only the software changed.  Every JTAG
@@ -223,6 +226,14 @@ for DDR3.  Every camera frame carries a frame id in its pixel pattern; the
 scoreboard requires that each displayed frame matches exactly one camera frame
 id for **all** of its pixels — that is what proves there is no tearing and no
 column shift.  `tb_lcd_timing` checks the real 1056×526 geometry at 33.333 MHz.
+`tb_sccb` drives the SCCB byte engine with a slave model that acknowledges every
+byte and records it, so the register-write protocol, the NACK report, the extra
+post-reset delay and the 400 kHz bit rate are all checked without a sensor.
+`tb_init_seq` goes one level up: it runs `ov5640_init` and `sii9022_init` against
+the same kind of slave model and compares **every** byte on the wire with the ROM
+entry the block should be sending — 252 OV5640 writes (16-bit register address)
+and 42 SiI9022A writes (8-bit register address), plus the 5 ms gap after the
+software-reset entry.
 
 ## Verification
 
@@ -230,7 +241,7 @@ column shift.  `tb_lcd_timing` checks the real 1056×526 geometry at 33.333 MHz.
 
 ```
 === tb_pipeline ===
-capture: x=0 y=10 frames=25
+capture: x=0 y=10 words=12448
 DDR buffer 0: 0c0e080e040e000e 1c0e180e140e100e 2c0e280e240e200e 3c0e380e340e300e
 DDR buffer 1: 0c0d080d040d000d 1c0d180d140d100d 2c0d280d240d200d 3c0d380d340d300d
 displayed frames=31 scored pixels=60488 good=29 bad=0
@@ -244,6 +255,18 @@ frame 2: 555456 clocks, 384000 pixels, 480 lines, vsync low 3168
 frame 3: 555456 clocks, 384000 pixels, 480 lines, vsync low 3168
 frame 4: 555456 clocks, 384000 pixels, 480 lines, vsync low 3168
 TEST PASS: 1056 x 526 @ 33.333 MHz = 60.01 Hz, 4 frames, no underrun (0)
+
+=== tb_sccb ===
+16-bit write: 4 bytes, SCL period 2480 ns, 4726 clocks
+8-bit write:  3 bytes, byte order checked
+NACK report:   ack=1
+dly_max=2000:  sequence took 6726 clocks
+TEST PASS
+
+=== tb_init_seq ===
+camera: 252 writes, 5245 us reset gap, init_done=1
+hdmi:   42 writes
+TEST PASS
 ```
 
 (The `frame 1` VSYNC measurement is the very first frame after reset, whose counter
@@ -254,16 +277,25 @@ pixel (no tearing, no shift), the freeze check saw 13 frozen frames with a stabl
 id, and there were no underruns and no AXI errors.  The DDR dump line shows
 `{p3,p2,p1,p0}` packing and the two buffers holding different frames.
 
+`tb_sccb` checks what the sensor actually sees on the SCCB wires: device id,
+register address and data in that order (two address bytes for the OV5640, one
+for the SiI9022A), the NACK report, the extra 2000-clock delay when one is
+requested, and an SCL period of 2480 ns — 403 kHz at 50 MHz.
+
 ### Implementation (Vivado 2023.2, default strategy)
 
 | Metric | Value |
 |---|---|
-| WNS / WHS | **+2.937 ns / +0.035 ns** — all user constraints met |
-| Slice LUTs | 7 829 (14.7 %) |
-| Slice registers | 20 552 (19.3 %) |
+| WNS / WHS | **+3.424 ns / +0.020 ns** — all user constraints met |
+| Slice LUTs | 7 767 (14.6 %) |
+| Slice registers | 20 530 (19.3 %) |
 | Block RAM | 0.5 tile (the OV5640 register table) |
 | Bonded IOB | 38 (30.4 %) — camera header + panel + LED/backlight + HDMI I2C |
 | BUFG / MMCM | 5 / 1 |
+
+(The 100 critical warnings in the build log are the PS7 IP's own XDC trying to
+constrain pins that the block design drives; they are present in every build of
+this design and do not affect it.)
 
 ### On the board
 
@@ -284,6 +316,7 @@ cam init=1 live=1 fps=30 frames=2455 | panel frames=7009 underruns=0 errs=0 | bl
 | Frame content | both buffers hold real 2-D image data (`row_delta` ≈ 85, i.e. rows differ) |
 | Backlight (`b`) | duty cycles 255 → 153 → 77 → 26 and back, visible on the panel |
 | Test pattern (`p`) | 8 colour bars + white frame on the panel instead of the camera |
+| After the register-address fix | `init=1 live=1 fps=30`, `underruns=0`; dumps 1.2 s apart differ, frozen dumps identical — `docs/frame_live.png` is one of them |
 
 The camera was lying on the desk a few centimetres from a tangle of cables, so the
 picture is an out-of-focus close-up and the room is dim: `docs/frame.png` is the raw
@@ -328,6 +361,30 @@ complete.
 HDMI.  Its registers are written over the PL I2C bus (T10/R14) one second after
 reset.  If no HDMI sink is attached the writes simply NACK and are ignored.
 
+**SCCB is write-only.** Both bring-up engines only ever write registers, so the
+I2C block implements the master-write direction alone: a byte engine
+(`i2c_bit_shift`, four quarter phases per SCL period, open drain) under a
+sequencer that turns one "write register" request into device id, register
+address (one byte for the SiI9022A, two for the OV5640) and data.  The vendor read
+path, the ov7725/JPEG table options and the unused camera reset/power-down pins
+are gone, and `sim/tb_sccb.v` checks the resulting protocol against a slave model.
+
+**A NACK-free init does not mean the right registers were written.** The sensor
+acknowledges every well-formed byte on its device address, so an init that
+completes (and reports `init=1`) can still have addressed the wrong register —
+that is exactly how a "black screen but init=1" failure looks.  `tb_init_seq`
+therefore compares the bytes on the wire with the ROM table entry by entry; keep
+that test in step with the tables.
+
+**RTL conventions.** Every module has the same shape: `timescale`, a header with
+the clock domains and invariants, an ANSI port list with the clock first, an
+asynchronous active-low reset, `S_*` localparams for state encodings, four-space
+indentation and one declaration per line.  See `docs/rtl_style.md`.  The same pass
+removed what nothing used — the capture frame/line counters and x/y status
+outputs, the DDR engine's read-ID inputs, the SCCB register-read path, the
+ov7725/JPEG table options and the camera reset/power-down pins — for 51 fewer
+LUTs and 22 fewer registers than the previous build.
+
 **The camera PCLK pin is not clock-capable.** `M17` is a plain I/O, so the IOB → BUFG
 route trips the `rule_gclkio_bufg` DRC.  The vendor reference design waives the same
 rule; here the waiver is applied by `ps/impl_pre.tcl`, hooked into the implementation
@@ -353,10 +410,16 @@ No external PL clock pin: the design runs from PS FCLK0 (50 MHz).
 
 ## Provenance
 
-`camera_init.v`, `i2c_control.v`, `i2c_bit_shift.v`, `ov5640_init_table_rgb.v`,
-`sii9022_init.v` and `sii9022_init_table.v` are the vendor reference modules from
+`ov5640_init.v`, `i2c_control.v`, `i2c_bit_shift.v`, `ov5640_init_table_rgb.v`,
+`sii9022_init.v` and `sii9022_init_table.v` are derived from the vendor reference
+modules in
 `盘A_ACZ702开发板标准配套资料/02_设计实例/02_【逻辑例程】…/ch46_acz702_ov5640_ddr3_tft_ic_hdmi`
-(武汉芯路恒科技), converted from GBK to UTF-8 and otherwise unchanged — the 252-entry
-OV5640 register table and the I2C bit timing are worth reusing verbatim.  The
-capture, FIFO, DDR engine, panel timing, block design, application and testbenches
-are new; the DDR3/PS7 preset is the board's vendor preset.
+(武汉芯路恒科技), converted from GBK to UTF-8.  The **register data** — the
+252-entry OV5640 table, the 42-entry SiI9022A table and the I2C bit timing — is
+kept verbatim; the logic around it was reworked into this project's conventions:
+the interface is write-only SCCB (no register reads), the ov7725/JPEG table
+variants and the unused camera reset/power-down pins are gone, ports are renamed
+to the lowercase `clk` / `rst_n` / `wr_done` scheme, and the byte timing is
+written as a four-phase state machine instead of a 32-entry case.  The capture,
+FIFO, DDR engine, panel timing, block design, application and testbenches are
+new; the DDR3/PS7 preset is the board's vendor preset.

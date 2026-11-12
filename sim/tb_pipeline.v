@@ -258,38 +258,31 @@ module tb_pipeline;
     wire [63:0] cam_word;
     wire        cam_word_valid;
     wire        cam_word_first;
-    wire [15:0] cam_frames_cap;
-    wire [11:0] cam_x, cam_y;
-    wire        cam_line_active;
 
     ov5640_capture #(.H_ACTIVE(H), .V_ACTIVE(V)) u_cap (
-        .pclk       (pclk),
-        .rst_n      (aresetn),
-        .vsync      (cam_vsync),
-        .href       (cam_href),
-        .data       (cam_data),
-        .word       (cam_word),
-        .word_valid (cam_word_valid),
-        .word_first (cam_word_first),
-        .frame_cnt  (cam_frames_cap),
-        .x_cnt      (cam_x),
-        .y_cnt      (cam_y),
-        .line_active(cam_line_active)
+        .pclk      (pclk),
+        .rst_n     (aresetn),
+        .vsync     (cam_vsync),
+        .href      (cam_href),
+        .data      (cam_data),
+        .word      (cam_word),
+        .word_valid(cam_word_valid),
+        .word_first(cam_word_first)
     );
 
     wire [64:0] camf_data;
     wire        camf_empty, camf_pop;
     wire [7:0]  camf_level;
 
-    afifo64 #(.AW(7), .W(65)) u_cfifo (
+    afifo #(.AW(7), .W(65)) u_cfifo (
         .wr_clk  (pclk),
-        .wr_rstn (aresetn),
+        .wr_rst_n(aresetn),
         .wr_data ({cam_word_first, cam_word}),
         .wr_en   (cam_word_valid),
         .wr_full (),
         .wr_level(),
         .rd_clk  (clk50),
-        .rd_rstn (aresetn),
+        .rd_rst_n(aresetn),
         .rd_data (camf_data),
         .rd_en   (camf_pop),
         .rd_empty(camf_empty),
@@ -315,7 +308,7 @@ module tb_pipeline;
         .DISP_LEVEL (32)
     ) u_fb (
         .clk           (clk50),
-        .rstn          (aresetn),
+        .rst_n         (aresetn),
         .m_axi_awid    (dut_awid),
         .m_axi_awaddr  (dut_awaddr),
         .m_axi_awlen   (dut_awlen),
@@ -333,7 +326,6 @@ module tb_pipeline;
         .m_axi_wlast   (dut_wlast),
         .m_axi_wvalid  (dut_wvalid),
         .m_axi_wready  (wready),
-        .m_axi_bid     (4'd0),
         .m_axi_bresp   (2'b00),
         .m_axi_bvalid  (bvalid),
         .m_axi_bready  (dut_bready),
@@ -349,7 +341,6 @@ module tb_pipeline;
         .m_axi_arregion(dut_arregion),
         .m_axi_arvalid (dut_arvalid),
         .m_axi_arready (arready),
-        .m_axi_rid     (4'd0),
         .m_axi_rdata   (rdata),
         .m_axi_rresp   (2'b00),
         .m_axi_rlast   (rlast),
@@ -375,15 +366,15 @@ module tb_pipeline;
     wire [63:0] pixf_data;
     wire        pixf_empty, pixf_pop;
 
-    afifo64 #(.AW(7), .W(64)) u_dfifo (
+    afifo #(.AW(7), .W(64)) u_dfifo (
         .wr_clk  (clk50),
-        .wr_rstn (aresetn),
+        .wr_rst_n(aresetn),
         .wr_data (disf_data),
         .wr_en   (disf_push),
         .wr_full (disf_full),
         .wr_level(disf_level),
         .rd_clk  (pix),
-        .rd_rstn (aresetn),
+        .rd_rst_n(aresetn),
         .rd_data (pixf_data),
         .rd_en   (pixf_pop),
         .rd_empty(pixf_empty),
@@ -520,7 +511,7 @@ module tb_pipeline;
     initial begin
         $display("=== video pipeline testbench (H=%0d V=%0d) ===", H, V);
         #3_000_000;                        // ~15 camera frames
-        $display("capture: x=%0d y=%0d frames=%0d", u_cap.x_cnt, u_cap.y_cnt, u_cap.frame_cnt);
+        $display("capture: x=%0d y=%0d words=%0d", u_cap.x_cnt, u_cap.y_cnt, camw);
         $display("DDR buffer 0: %h %h %h %h", mem[0], mem[1], mem[2], mem[3]);
         $display("DDR buffer 1: %h %h %h %h", mem[FB_BYTES/8], mem[FB_BYTES/8+1],
                  mem[FB_BYTES/8+2], mem[FB_BYTES/8+3]);

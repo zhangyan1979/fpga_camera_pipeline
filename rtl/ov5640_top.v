@@ -5,16 +5,16 @@
 //                                                      |   AXI4 master -> HP0
 //      panel  <-- 33.3 MHz timing <-- FIFO <-- read engine
 //
-//  The PS is only needed for its DDR3 controller and its clocks: FCLK0 = 50 MHz
-//  feeds the whole AXI side, and two AXI GPIOs carry a 32-bit control word out
-//  and two 32-bit status words back, so the bare-metal application can report
-//  frame rates and switch modes over the serial console.
+//  The PS only supplies the DDR3 controller and the clocks: FCLK0 = 50 MHz feeds
+//  the whole AXI side, and two AXI GPIOs carry a 32-bit control word out and two
+//  32-bit status words back, so the bare-metal application can report frame rates
+//  and switch modes over the serial console.
 //
 //  Control word (PS -> PL)                  Status words (PL -> PS)
-//    ctrl[0]      test pattern              status_cam[0]     camera init done
-//    ctrl[1]      freeze frame              status_cam[1]     camera streaming
-//    ctrl[7:2]    reserved                  status_cam[15:8]  camera fps
-//    ctrl[15:8]   backlight duty 0..255     status_cam[31:16] camera frames
+//    ctrl[0]      test pattern              status_cam[0]      camera init done
+//    ctrl[1]      freeze frame              status_cam[1]      camera streaming
+//    ctrl[7:2]    reserved                  status_cam[15:8]   camera fps
+//    ctrl[15:8]   backlight duty 0..255     status_cam[31:16]  camera frames
 //    ctrl[31:16]  reserved
 //                                           status_disp[15:0]  panel frames
 //                                           status_disp[23:16] frames with a
@@ -29,8 +29,7 @@
 module ov5640_top #(
     parameter integer H_ACTIVE = 800,
     parameter integer V_ACTIVE = 480,
-    parameter integer HDMI_INIT = 1,
-    parameter [31:0]  FB_BASE   = 32'h0180_0000
+    parameter [31:0]  FB_BASE  = 32'h0180_0000
 ) (
     // ---- PS side ------------------------------------------------------------
     input  wire        clk50,           // PS FCLK0, 50 MHz
@@ -85,7 +84,7 @@ module ov5640_top #(
     input  wire        camera_pclk,
     input  wire        camera_href,
     input  wire        camera_vsync,
-    input  wire [7:0]  camera_data,
+    input  wire [ 7:0] camera_data,
     // ---- TFT / HDMI RGB interface -------------------------------------------
     output wire [15:0] lcd_rgb,
     output wire        lcd_hsync,
@@ -100,107 +99,96 @@ module ov5640_top #(
     output wire        led
 );
 
-    localparam integer FB_BYTES = H_ACTIVE * V_ACTIVE * 2;
+    localparam [26:0] HDMI_DELAY = 27'd50_000_000;   // 1 s at 50 MHz
 
     // =========================================================================
     //  Clocks and resets
     // =========================================================================
-    reg [1:0] arst_sync;
+    // AXI domain: synchronised release of the PS reset
+    reg [1:0] rst50_sync;
     always @(posedge clk50 or negedge aresetn) begin
-        if (!aresetn) arst_sync <= 2'b00;
-        else          arst_sync <= {arst_sync[0], 1'b1};
+        if (!aresetn) rst50_sync <= 2'b00;
+        else          rst50_sync <= {rst50_sync[0], 1'b1};
     end
+    wire rst50_n = rst50_sync[1];
 
-    wire rst50_n = arst_sync[1];
-
-    (* keep = "true" *) wire pll_locked;
     wire clk_pix;
     wire clk_cam;
+    wire mmcm_locked;
 
-    clk_gen u_clk (
+    clk_gen u_clk_gen (
         .clk50  (clk50),
-        .reset  (~rst50_n),
+        .rst    (~rst50_n),
         .clk_pix(clk_pix),
         .clk_cam(clk_cam),
-        .locked (pll_locked)
+        .locked (mmcm_locked)
     );
 
-    wire sys_rst_n = rst50_n & pll_locked;
+    wire sys_rst_n = rst50_n & mmcm_locked;
 
-    // pixel-clock domain reset
-    reg [2:0] prst;
+    // pixel domain: released once the MMCM is locked
+    reg [2:0] rst_pix_sync;
     always @(posedge clk_pix or negedge aresetn) begin
-        if (!aresetn) prst <= 3'b000;
-        else          prst <= {prst[1:0], 1'b1};
+        if (!aresetn) rst_pix_sync <= 3'b000;
+        else          rst_pix_sync <= {rst_pix_sync[1:0], 1'b1};
     end
-    wire pix_rst_n = prst[2] & pll_locked;
+    wire pix_rst_n = rst_pix_sync[2] & mmcm_locked;
 
-    // camera PCLK domain reset (the camera only produces PCLK once it is
-    // powered and configured, so this simply follows the board reset)
-    wire cam_pclk_buf;
-
-    BUFG u_bufg_pclk (
+    // camera PCLK domain: the sensor only produces PCLK once it is powered and
+    // configured, so this follows the board reset.  M17 is not a clock-capable
+    // pin, which is why the clock goes through an explicit BUFG here.
+    wire cam_pclk;
+    BUFG u_bufg_cam_pclk (
         .I(camera_pclk),
-        .O(cam_pclk_buf)
+        .O(cam_pclk)
     );
 
-    reg [2:0] crst;
-    always @(posedge cam_pclk_buf or negedge aresetn) begin
-        if (!aresetn) crst <= 3'b000;
-        else          crst <= {crst[1:0], 1'b1};
+    reg [2:0] rst_cam_sync;
+    always @(posedge cam_pclk or negedge aresetn) begin
+        if (!aresetn) rst_cam_sync <= 3'b000;
+        else          rst_cam_sync <= {rst_cam_sync[1:0], 1'b1};
     end
-    wire cam_rst_n = crst[2];
+    wire cam_rst_n = rst_cam_sync[2];
 
     assign camera_xclk = clk_cam;
 
     // =========================================================================
-    //  OV5640 register initialisation (I2C on the camera header, PL bit-banged)
+    //  OV5640 register initialisation (SCCB on the camera header)
     // =========================================================================
     wire cam_init_done;
 
-    camera_init #(
-        .CAMERA_TYPE    ("ov5640"),
-        .IMAGE_TYPE     (0),            // 0 = RGB, 1 = JPEG
+    ov5640_init #(
         .IMAGE_WIDTH    (H_ACTIVE),
         .IMAGE_HEIGHT   (V_ACTIVE),
-        .IMAGE_FLIP_EN  (0),
-        .IMAGE_MIRROR_EN(0)
-    ) u_cam_cfg (
-        .Clk          (clk50),
-        .Rst_n        (sys_rst_n),
-        .Init_Done    (cam_init_done),
-        .camera_rst_n (),
-        .camera_pwdn  (),
-        .i2c_sclk     (camera_sclk),
-        .i2c_sdat     (camera_sdat)
+        .IMAGE_FLIP_EN  (1'b0),
+        .IMAGE_MIRROR_EN(1'b0)
+    ) u_ov5640_init (
+        .clk      (clk50),
+        .rst_n    (sys_rst_n),
+        .init_done(cam_init_done),
+        .i2c_sclk (camera_sclk),
+        .i2c_sdat (camera_sdat)
     );
 
     // =========================================================================
-    //  DVP capture -> 64-bit packed words (PCLK domain)
+    //  DVP capture -> 64-bit packed words (camera PCLK domain)
     // =========================================================================
     wire [63:0] cam_word;
     wire        cam_word_valid;
     wire        cam_word_first;
-    wire [15:0] cam_frame_cnt;
-    wire [11:0] cam_x, cam_y;
-    wire        cam_line_active;
 
     ov5640_capture #(
         .H_ACTIVE(H_ACTIVE),
         .V_ACTIVE(V_ACTIVE)
     ) u_capture (
-        .pclk       (cam_pclk_buf),
-        .rst_n      (cam_rst_n),
-        .vsync      (camera_vsync),
-        .href       (camera_href),
-        .data       (camera_data),
-        .word       (cam_word),
-        .word_valid (cam_word_valid),
-        .word_first (cam_word_first),
-        .frame_cnt  (cam_frame_cnt),
-        .x_cnt      (cam_x),
-        .y_cnt      (cam_y),
-        .line_active(cam_line_active)
+        .pclk      (cam_pclk),
+        .rst_n     (cam_rst_n),
+        .vsync     (camera_vsync),
+        .href      (camera_href),
+        .data      (camera_data),
+        .word      (cam_word),
+        .word_valid(cam_word_valid),
+        .word_first(cam_word_first)
     );
 
     // =========================================================================
@@ -210,21 +198,24 @@ module ov5640_top #(
     wire [64:0] camf_data;
     wire        camf_empty;
     wire        camf_pop;
-    wire [7:0]  camf_rd_level;
+    wire [7:0]  camf_level;
 
-    afifo64 #(.AW(7), .W(65)) u_cam_fifo (
-        .wr_clk  (cam_pclk_buf),
-        .wr_rstn (cam_rst_n),
+    afifo #(
+        .AW(7),
+        .W (65)
+    ) u_cam_fifo (
+        .wr_clk  (cam_pclk),
+        .wr_rst_n(cam_rst_n),
         .wr_data ({cam_word_first, cam_word}),
         .wr_en   (cam_word_valid),
         .wr_full (),
         .wr_level(),
         .rd_clk  (clk50),
-        .rd_rstn (sys_rst_n),
+        .rd_rst_n(sys_rst_n),
         .rd_data (camf_data),
         .rd_en   (camf_pop),
         .rd_empty(camf_empty),
-        .rd_level(camf_rd_level)
+        .rd_level(camf_level)
     );
 
     // =========================================================================
@@ -233,26 +224,27 @@ module ov5640_top #(
     wire [63:0] disf_data;
     wire        disf_push;
     wire        disf_full;
-    wire [7:0]  disf_wr_level;
+    wire [7:0]  disf_level;
+    wire        rel_req;
     wire        rel_ack;
     wire        frame_seen;
-    wire [15:0] cam_frames_axi;
-    wire [7:0]  axi_errs;
     wire        frame_new;
-    wire        rel_req;
-    wire        test_pattern = ctrl[0];
-    wire        freeze       = ctrl[1];
+    wire [15:0] cam_frames;
+    wire [ 7:0] axi_errs;
+
+    wire test_pattern = ctrl[0];
+    wire freeze       = ctrl[1];
 
     fb_ddr #(
-        .FB_BASE    (FB_BASE),
-        .H_ACTIVE   (H_ACTIVE),
-        .V_ACTIVE   (V_ACTIVE),
-        .BEATS      (16),
-        .CAM_LEVEL  (24),
-        .DISP_LEVEL (32)
-    ) u_fb (
+        .FB_BASE   (FB_BASE),
+        .H_ACTIVE  (H_ACTIVE),
+        .V_ACTIVE  (V_ACTIVE),
+        .BEATS     (16),
+        .CAM_LEVEL (24),
+        .DISP_LEVEL(32)
+    ) u_fb_ddr (
         .clk           (clk50),
-        .rstn          (sys_rst_n),
+        .rst_n         (sys_rst_n),
         .m_axi_awid    (m_axi_awid),
         .m_axi_awaddr  (m_axi_awaddr),
         .m_axi_awlen   (m_axi_awlen),
@@ -270,7 +262,6 @@ module ov5640_top #(
         .m_axi_wlast   (m_axi_wlast),
         .m_axi_wvalid  (m_axi_wvalid),
         .m_axi_wready  (m_axi_wready),
-        .m_axi_bid     (m_axi_bid),
         .m_axi_bresp   (m_axi_bresp),
         .m_axi_bvalid  (m_axi_bvalid),
         .m_axi_bready  (m_axi_bready),
@@ -286,7 +277,6 @@ module ov5640_top #(
         .m_axi_arregion(m_axi_arregion),
         .m_axi_arvalid (m_axi_arvalid),
         .m_axi_arready (m_axi_arready),
-        .m_axi_rid     (m_axi_rid),
         .m_axi_rdata   (m_axi_rdata),
         .m_axi_rresp   (m_axi_rresp),
         .m_axi_rlast   (m_axi_rlast),
@@ -295,16 +285,16 @@ module ov5640_top #(
         .cam_data      (camf_data),
         .cam_empty     (camf_empty),
         .cam_pop       (camf_pop),
-        .cam_level     (camf_rd_level),
+        .cam_level     (camf_level),
         .disp_data     (disf_data),
         .disp_push     (disf_push),
         .disp_full     (disf_full),
-        .disp_level    (disf_wr_level),
+        .disp_level    (disf_level),
         .rel_req       (rel_req),
         .rel_ack       (rel_ack),
         .freeze        (freeze),
         .frame_seen    (frame_seen),
-        .cam_frames    (cam_frames_axi),
+        .cam_frames    (cam_frames),
         .axi_errs      (axi_errs),
         .frame_new     (frame_new)
     );
@@ -316,15 +306,18 @@ module ov5640_top #(
     wire        pixf_empty;
     wire        pixf_pop;
 
-    afifo64 #(.AW(7), .W(64)) u_disp_fifo (
+    afifo #(
+        .AW(7),
+        .W (64)
+    ) u_disp_fifo (
         .wr_clk  (clk50),
-        .wr_rstn (sys_rst_n),
+        .wr_rst_n(sys_rst_n),
         .wr_data (disf_data),
         .wr_en   (disf_push),
         .wr_full (disf_full),
-        .wr_level(disf_wr_level),
+        .wr_level(disf_level),
         .rd_clk  (clk_pix),
-        .rd_rstn (pix_rst_n),
+        .rd_rst_n(pix_rst_n),
         .rd_data (pixf_data),
         .rd_en   (pixf_pop),
         .rd_empty(pixf_empty),
@@ -343,12 +336,12 @@ module ov5640_top #(
     //  Panel
     // =========================================================================
     wire [15:0] disp_frames;
-    wire [7:0]  disp_underruns;
+    wire [ 7:0] disp_underruns;
 
     lcd_display #(
         .H_ACTIVE(H_ACTIVE),
         .V_ACTIVE(V_ACTIVE)
-    ) u_lcd (
+    ) u_lcd_display (
         .pix_clk     (clk_pix),
         .rst_n       (pix_rst_n),
         .fifo_data   (pixf_data),
@@ -368,7 +361,9 @@ module ov5640_top #(
 
     assign lcd_pclk = clk_pix;
 
-    // ---- backlight: 8-bit PWM at 195 kHz, default full scale ----------------
+    // =========================================================================
+    //  Backlight: 8-bit PWM at 195 kHz, duty from ctrl[15:8]
+    // =========================================================================
     reg [7:0] bl_cnt;
     always @(posedge clk50 or negedge sys_rst_n) begin
         if (!sys_rst_n) bl_cnt <= 8'd0;
@@ -380,8 +375,8 @@ module ov5640_top #(
     //  Camera statistics (AXI clock domain) and status words
     // =========================================================================
     reg [26:0] sec_cnt;
-    reg [7:0]  fps_cnt;
-    reg [7:0]  cam_fps;
+    reg [ 7:0] fps_cnt;
+    reg [ 7:0] cam_fps;
     reg        cam_streaming;
 
     always @(posedge clk50 or negedge sys_rst_n) begin
@@ -391,8 +386,7 @@ module ov5640_top #(
             cam_fps       <= 8'd0;
             cam_streaming <= 1'b0;
         end else begin
-            if (frame_new)
-                fps_cnt <= fps_cnt + 8'd1;
+            if (frame_new) fps_cnt <= fps_cnt + 8'd1;
 
             if (sec_cnt == 27'd49_999_999) begin
                 sec_cnt       <= 27'd0;
@@ -406,25 +400,25 @@ module ov5640_top #(
     end
 
     // pixel-domain counters into the AXI clock domain (levels, sampled)
-    reg [15:0] dfrm_s1, dfrm_s2;
-    reg [7:0]  und_s1,  und_s2;
+    reg [15:0] disp_frames_s1, disp_frames_s2;
+    reg [ 7:0] underruns_s1,   underruns_s2;
 
     always @(posedge clk50 or negedge sys_rst_n) begin
         if (!sys_rst_n) begin
-            dfrm_s1 <= 16'd0;
-            dfrm_s2 <= 16'd0;
-            und_s1  <= 8'd0;
-            und_s2  <= 8'd0;
+            disp_frames_s1 <= 16'd0;
+            disp_frames_s2 <= 16'd0;
+            underruns_s1   <= 8'd0;
+            underruns_s2   <= 8'd0;
         end else begin
-            dfrm_s1 <= disp_frames;
-            dfrm_s2 <= dfrm_s1;
-            und_s1  <= disp_underruns;
-            und_s2  <= und_s1;
+            disp_frames_s1 <= disp_frames;
+            disp_frames_s2 <= disp_frames_s1;
+            underruns_s1   <= disp_underruns;
+            underruns_s2   <= underruns_s1;
         end
     end
 
-    assign status_cam = {cam_frames_axi, cam_fps, 6'd0, cam_streaming, cam_init_done};
-    assign status_disp = {axi_errs, und_s2, dfrm_s2};
+    assign status_cam  = {cam_frames, cam_fps, 6'd0, cam_streaming, cam_init_done};
+    assign status_disp = {axi_errs, underruns_s2, disp_frames_s2};
 
     // =========================================================================
     //  Board LED: slow blink while video is running, fast blink otherwise
@@ -434,52 +428,40 @@ module ov5640_top #(
         if (!sys_rst_n) led_cnt <= 26'd0;
         else            led_cnt <= led_cnt + 26'd1;
     end
-
     assign led = cam_streaming ? led_cnt[25] : led_cnt[22];
 
     // =========================================================================
     //  HDMI transmitter (SiI9022A) set-up over the PL I2C bus
     // =========================================================================
-    generate
-    if (HDMI_INIT != 0) begin : g_hdmi
-        reg [26:0] hdmi_dly;
-        reg        hdmi_go;
-        reg        hdmi_started;
+    reg [26:0] hdmi_dly;
+    reg        hdmi_go;
+    reg        hdmi_started;
 
-        // one single-cycle start pulse, one second after the PL comes out of reset
-        always @(posedge clk50 or negedge sys_rst_n) begin
-            if (!sys_rst_n) begin
-                hdmi_dly     <= 27'd0;
-                hdmi_go      <= 1'b0;
-                hdmi_started <= 1'b0;
-            end else begin
-                hdmi_go <= 1'b0;
-                if (!hdmi_started) begin
-                    if (hdmi_dly == 27'd49_999_999) begin
-                        hdmi_go      <= 1'b1;
-                        hdmi_started <= 1'b1;
-                    end else begin
-                        hdmi_dly <= hdmi_dly + 27'd1;
-                    end
+    // one single-cycle start pulse, one second after the PL comes out of reset
+    always @(posedge clk50 or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            hdmi_dly     <= 27'd0;
+            hdmi_go      <= 1'b0;
+            hdmi_started <= 1'b0;
+        end else begin
+            hdmi_go <= 1'b0;
+            if (!hdmi_started) begin
+                if (hdmi_dly == HDMI_DELAY - 27'd1) begin
+                    hdmi_go      <= 1'b1;
+                    hdmi_started <= 1'b1;
+                end else begin
+                    hdmi_dly <= hdmi_dly + 27'd1;
                 end
             end
         end
-
-        SiI9022_Init u_hdmi (
-            .Clk       (clk50),
-            .Rst_n     (sys_rst_n),
-            .Go        (hdmi_go),
-            .device_id (16'h0072),
-            .Init_Done (),
-            .i2c_sclk  (hdmi_sclk),
-            .i2c_sdat  (hdmi_sdat)
-        );
-    end else begin : g_no_hdmi
-        assign hdmi_sclk = 1'b1;
-        assign hdmi_sdat = 1'bz;
     end
-    endgenerate
 
-
+    sii9022_init u_sii9022_init (
+        .clk     (clk50),
+        .rst_n   (sys_rst_n),
+        .go      (hdmi_go),
+        .i2c_sclk(hdmi_sclk),
+        .i2c_sdat(hdmi_sdat)
+    );
 
 endmodule

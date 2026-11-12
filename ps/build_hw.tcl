@@ -17,10 +17,10 @@ add_files -norecurse [list \
     [file join $rtl ov5640_top.v] \
     [file join $rtl clk_gen.v] \
     [file join $rtl ov5640_capture.v] \
-    [file join $rtl afifo64.v] \
+    [file join $rtl afifo.v] \
     [file join $rtl fb_ddr.v] \
     [file join $rtl lcd_display.v] \
-    [file join $rtl camera_init.v] \
+    [file join $rtl ov5640_init.v] \
     [file join $rtl i2c_control.v] \
     [file join $rtl i2c_bit_shift.v] \
     [file join $rtl ov5640_init_table_rgb.v] \
