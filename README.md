@@ -379,7 +379,8 @@ that test in step with the tables.
 **RTL conventions.** Every module has the same shape: `timescale`, a header with
 the clock domains and invariants, an ANSI port list with the clock first, an
 asynchronous active-low reset, `S_*` localparams for state encodings, four-space
-indentation and one declaration per line.  See `docs/rtl_style.md`.  The same pass
+indentation and one declaration per line.  See `docs/rtl_style.md`.  Gray pointers in the
+async FIFOs: `docs/afifo_gray_pointers.md`.  The same pass
 removed what nothing used — the capture frame/line counters and x/y status
 outputs, the DDR engine's read-ID inputs, the SCCB register-read path, the
 ov7725/JPEG table options and the camera reset/power-down pins — for 51 fewer

@@ -13,6 +13,8 @@
 //  Pointers are Gray coded and synchronized with two flops each way; full is
 //  decided in the write domain and empty in the read domain, from the
 //  synchronized copy of the other pointer - the standard safe construction.
+//  See docs/afifo_gray_pointers.md for why Gray code is used and how full/empty
+//  are derived.
 //
 //  wr_level / rd_level report the occupancy in words as seen from each side.
 //  They trail by the synchronizer latency, which is the safe direction for the
