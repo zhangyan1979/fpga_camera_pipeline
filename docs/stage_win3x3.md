@@ -93,7 +93,52 @@ regenerated with a second `img_geom`: they were written into the buffer with the
 pixels and are read back from the middle row, which is exactly "the tag delayed
 by the same number of words as the data".
 
-### 1.3 Output alignment
+### 1.3 Worked example: one word through the pipeline
+
+Take word `x = 57` of output line `y = 100`.  It carries output pixels at columns
+228…231, and their 3×3 windows need input columns 227…232 of rows 99…101.  The
+eight-clock slot for that word looks like this:
+
+| clock | phase | P1 (one pixel) | P2 (one pixel) | P3 (one pixel) | other work |
+|---|---|---|---|---|---|
+| 0 | 0 | – | – | – | drive read address 57 |
+| 1 | 1 | – | – | – | row words 57 registered; read 58 launched |
+| 2 | 2 | pixel 228 | – | – | spans 227…232 assembled, word 57 written, carries reloaded |
+| 3 | 3 | pixel 229 | pixel 228 | – | |
+| 4 | 4 | pixel 230 | pixel 229 | pixel 228 | |
+| 5 | 5 | pixel 231 | pixel 230 | pixel 229 | |
+| 6 | 6 | – | pixel 231 | pixel 230 | |
+| 7 | 7 | – | – | pixel 231 | word `{231,230,229,228}` pushed, statistic, line ring |
+
+P1 of pixel 228 reads the spans while they are still combinational in phase 2;
+pixels 229…231 read the registered copy.  Word 58 starts its phase 0 on the next
+clock.  The word assembled at phase 7 of word 57 is emitted from the four-slot
+aligner when word 61 reaches phase 7, which is the documented two lines plus
+four words.
+
+Concrete arithmetic for pixel 229 (the second pixel of that word), mode 0.  Its
+nine widened R-channel neighbours are
+
+```
+        tl=16   tc=24   tr=33
+        ml=41   mc=99   mr=49
+        bl=57   bc=66   br=74
+```
+
+* **P1** — sum = 459; the nine luminance values are registered too; the first 12
+  comparators of the median network leave the R array as
+  `16,24,33,41,49,74,57,66,99`.  (G and B run the same circuits; R is shown.)
+* **P2** — product = 459 × 57 = 26 163; the last seven comparators take the
+  median to 49; min/max = 16/99; the Sobel gradients are computed from the
+  registered luminance values.
+* **P3** — mean = 26 163 >> 9 = 51; with `param = 0x0010` (+16 bias) the R
+  output is `clamp(51+16) = 67`, so R5 = 67 >> 3 = 8.  In the same window mode 2
+  would produce R5 = 49 >> 3 = 6, mode 3 R5 = 16 >> 3 = 2, mode 4
+  R5 = 99 >> 3 = 12, and mode 5 would clamp `5·99 − 4·51 = 291` to 255.  The
+  mode mux selects one of those in P3; the arithmetic behind all of them was
+  already computed in P1 and P2.
+
+### 1.4 Output alignment
 
 The computed word goes through a four-slot `{sof, eol, data}` shift register
 clocked once per completed word.  This adds exactly four *words* of latency
