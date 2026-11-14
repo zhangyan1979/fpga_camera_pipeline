@@ -76,7 +76,7 @@
 static const char *const stage_name[NUM_STAGES] = {
     "bypass",
     "lut point op",
-    "stage 2",
+    "win3x3",
     "histogram",
     "stage 4",
     "stage 5",

@@ -265,6 +265,33 @@ module ov5640_top #(
         .stat   (lut_stat)
     );
 
+    // ---- slot 2: 3x3 window filters (sel = 2) ------------------------------
+    // two whole lines of latency (404 words), so its line buffers are primed
+    // before the first output word of the frame
+    wire [63:0] win_data;
+    wire        win_valid;
+    wire        win_sof;
+    wire        win_eol;
+    wire [31:0] win_stat;
+
+    stage_win3x3 #(
+        .WORDS_PER_LINE(WORDS_PER_LINE)
+    ) u_stage_win3x3 (
+        .clk    (cam_pclk),
+        .rst_n  (cam_rst_n),
+        .s_data (cam_word),
+        .s_valid(cam_word_valid),
+        .s_sof  (cam_word_first),
+        .s_eol  (cam_weol),
+        .m_data (win_data),
+        .m_valid(win_valid),
+        .m_sof  (win_sof),
+        .m_eol  (win_eol),
+        .param  (stage_param),
+        .knob   (stage_knob),
+        .stat   (win_stat)
+    );
+
     // ---- slot 3: streaming histogram + auto exposure (sel = 3) --------------
     wire [63:0] hist_data;
     wire        hist_valid;
@@ -302,11 +329,11 @@ module ov5640_top #(
         .s_valid   (cam_word_valid),
         .s_sof     (cam_word_first),
         .s_eol     (cam_weol),
-        .st_data   ({cam_word,       hist_data,      cam_word,       lut_data}),
-        .st_valid  ({cam_word_valid, hist_valid,     cam_word_valid, lut_valid}),
-        .st_sof    ({cam_word_first, hist_sof,       cam_word_first, lut_sof}),
-        .st_eol    ({cam_weol,       hist_eol,       cam_weol,       lut_eol}),
-        .st_stat   ({32'd0,          hist_stat,      32'd0,          lut_stat}),
+        .st_data   ({cam_word,       hist_data,      win_data,       lut_data}),
+        .st_valid  ({cam_word_valid, hist_valid,     win_valid,      lut_valid}),
+        .st_sof    ({cam_word_first, hist_sof,       win_sof,        lut_sof}),
+        .st_eol    ({cam_weol,       hist_eol,       win_eol,        lut_eol}),
+        .st_stat   ({32'd0,          hist_stat,      win_stat,       lut_stat}),
         .sel       (ctrl[4:2]),
         .param     (ctrl[31:16]),
         .knob      ({5'd0, ctrl[7:5]}),
