@@ -133,9 +133,29 @@ counter drifts and the picture slides:
 
 One word leaves the camera every eight `cam_pclk` cycles, so a camera-side stage
 has eight clocks of slack per word — enough to share a sorting network between
-the four pixels of a word.  At the camera rate a 3×3 stage needs two line buffers
-(1 BRAM18 each) and a few hundred LUTs for median/morphology, or 3–14 DSPs for a
-separable linear filter.
+the four pixels of a word.  A 3×3 window needs a line buffer per row of history
+(one BRAM18 each at 200 words × 64 bits); the median needs no multiplier at all.
+
+## Processing stages
+
+Four stages are populated, all in the camera clock domain, all running in
+parallel, one selected at a time:
+
+| Slot | Stage | Modes (`k`) | `stat` (read back in the status line) |
+|---|---|---|---|
+| 1 | `stage_lut` | identity, brightness/contrast, gamma 0.7, luma threshold, false colour, invert | pixels above the threshold, frame mean luma, saturated pixels |
+| 2 | `stage_win3x3` | box mean, Sobel, median, erode, dilate, sharpen | edge pixels above the threshold, pixels changed |
+| 3 | `stage_hist` | pass-through + histogram, equalise, auto-exposure report | 99th percentile, mean, saturated %, strength applied |
+| 4 | `stage_seg` | four chroma boxes, paint or pass through | label count, label-0 box width / height / centre |
+
+`docs/stage_contract.md` is the interface they all implement; each stage's own
+`docs/stage_<name>.md` has its encoding, its cost and its algorithm.  Cycle the
+slot with `s`, the mode with `k`, and sweep the parameter with `+`/`-` while
+watching `stat`: that is Bailey's algorithm-tuning loop (§3.5.6) with the serial
+console as the user interface, and it costs one GPIO write.
+
+`ps/impl_iterate.tcl` re-runs place and route on the existing project, which is
+the fast path when only a stage changed.
 
 ## Clock domains
 
@@ -158,6 +178,7 @@ MMCM: VCO 1200 MHz (M = 24), CLKOUT0 /36, CLKOUT1 /50.
 | `rtl/fb_ddr.v` | AXI4 master: tag-driven DDR write engine + blanking-time read engine |
 | `rtl/stage_mux.v` | stage slot: selects one processing stage, gives it frame-stable parameters, moves its statistic back to the PS |
 | `rtl/img_geom.v` | word-stream geometry (end of line, word column, line index) regenerated on a delayed stream |
+| `rtl/stage_*.v` | the four processing stages in the slot: LUT point ops, 3×3 window, histogram/auto-exposure, colour segmentation |
 | `rtl/lcd_display.v` | 1056×526 timing, RGB565 output, reload handshake, underrun counter |
 | `rtl/clk_gen.v` | MMCM 33.333 MHz + 24 MHz |
 | `rtl/ov5640_init.v`, `rtl/i2c_control.v`, `rtl/i2c_bit_shift.v`, `rtl/ov5640_init_table_rgb.v` | OV5640 SCCB bring-up: 21 ms power-up wait, 252-entry write sequence, 5 ms post-reset delay (see Provenance) |
