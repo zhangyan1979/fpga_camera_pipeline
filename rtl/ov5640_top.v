@@ -265,6 +265,32 @@ module ov5640_top #(
         .stat   (lut_stat)
     );
 
+    // ---- slot 3: streaming histogram + auto exposure (sel = 3) --------------
+    wire [63:0] hist_data;
+    wire        hist_valid;
+    wire        hist_sof;
+    wire        hist_eol;
+    wire [31:0] hist_stat;
+
+    stage_hist #(
+        .WORDS_PER_LINE(WORDS_PER_LINE),
+        .LINES         (V_ACTIVE)
+    ) u_stage_hist (
+        .clk    (cam_pclk),
+        .rst_n  (cam_rst_n),
+        .s_data (cam_word),
+        .s_valid(cam_word_valid),
+        .s_sof  (cam_word_first),
+        .s_eol  (cam_weol),
+        .m_data (hist_data),
+        .m_valid(hist_valid),
+        .m_sof  (hist_sof),
+        .m_eol  (hist_eol),
+        .param  (stage_param),
+        .knob   (stage_knob),
+        .stat   (hist_stat)
+    );
+
     // a slot that is not populated is fed the raw stream, so any ctrl[4:2]
     // value is safe and the picture never depends on an unwritten stage
     stage_mux #(
@@ -276,11 +302,11 @@ module ov5640_top #(
         .s_valid   (cam_word_valid),
         .s_sof     (cam_word_first),
         .s_eol     (cam_weol),
-        .st_data   ({cam_word,       cam_word,       cam_word,       lut_data}),
-        .st_valid  ({cam_word_valid, cam_word_valid, cam_word_valid, lut_valid}),
-        .st_sof    ({cam_word_first, cam_word_first, cam_word_first, lut_sof}),
-        .st_eol    ({cam_weol,       cam_weol,       cam_weol,       lut_eol}),
-        .st_stat   ({32'd0,          32'd0,          32'd0,           lut_stat}),
+        .st_data   ({cam_word,       hist_data,      cam_word,       lut_data}),
+        .st_valid  ({cam_word_valid, hist_valid,     cam_word_valid, lut_valid}),
+        .st_sof    ({cam_word_first, hist_sof,       cam_word_first, lut_sof}),
+        .st_eol    ({cam_weol,       hist_eol,       cam_weol,       lut_eol}),
+        .st_stat   ({32'd0,          hist_stat,      32'd0,          lut_stat}),
         .sel       (ctrl[4:2]),
         .param     (ctrl[31:16]),
         .knob      ({5'd0, ctrl[7:5]}),
