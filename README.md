@@ -269,6 +269,17 @@ entry the block should be sending — 252 OV5640 writes (16-bit register address
 and 42 SiI9022A writes (8-bit register address), plus the 5 ms gap after the
 software-reset entry.
 
+Five more testbenches cover the stage slot itself.  `tb_stage_contract` drives
+three dummy stages of different latency through `stage_mux` and checks bit-exact
+bypass identity, tag and line-end alignment, exact words per frame, that a
+control write in mid-frame does not take effect until the next frame tag, the
+warm-up gating and the statistic handshake.  `tb_stage_lut`, `tb_stage_win3x3`,
+`tb_stage_hist` and `tb_stage_seg` each drive their stage with a synthetic stream
+whose content encodes frame / line / column and compare every output word with a
+reference model computed in the testbench.  `run_sim.ps1` discovers
+`sim/tb_*.v`, so a new stage adds a test without editing the script — and the run
+fails unless every testbench prints `TEST PASS`.
+
 ## Verification
 
 ### Simulation (`sim/run_sim.ps1`)
@@ -318,14 +329,25 @@ requested, and an SCL period of 2480 ns — 403 kHz at 50 MHz.
 
 ### Implementation (Vivado 2023.2, default strategy)
 
+Four-stage design (all four stages instantiated in parallel, one selected):
+
 | Metric | Value |
 |---|---|
-| WNS / WHS | **+3.424 ns / +0.020 ns** — all user constraints met |
-| Slice LUTs | 7 767 (14.6 %) |
-| Slice registers | 20 530 (19.3 %) |
-| Block RAM | 0.5 tile (the OV5640 register table) |
+| WNS / WHS | **+2.495 ns / +0.021 ns** — all user constraints met |
+| Slice LUTs | 15 269 (28.7 %) — 7 942 before the stages |
+| Slice registers | 24 144 (22.7 %) |
+| Block RAM | 4 tiles: 3 × RAMB36 (the 3×3 line buffers) + 2 × RAMB18 (histogram, OV5640 table) |
+| DSP48 | 12 (5.5 %) — the LUT affine multiply, the histogram strength blend, the segmentation reciprocal |
 | Bonded IOB | 38 (30.4 %) — camera header + panel + LED/backlight + HDMI I2C |
 | BUFG / MMCM | 5 / 1 |
+
+The 3×3 stage is the only one that needed retiming: its first version evaluated a
+whole pixel — window, three nine-value sums, the divide, the median network, the
+pack and a 32-bit statistic add — in one `cam_pclk` cycle, 32.2 ns over 37 logic
+levels with a phase register driving ~11 600 loads, for **WNS −8.331 ns** with 99
+failing endpoints. It is now a three-stage per-pixel pipeline overlapped across
+phases 2..7 of the eight-clock word period, with identical latency and behaviour.
+Every other stage closed timing as written.
 
 (The 100 critical warnings in the build log are the PS7 IP's own XDC trying to
 constrain pins that the block design drives; they are present in every build of
@@ -351,11 +373,20 @@ cam init=1 live=1 fps=30 frames=2455 | panel frames=7009 underruns=0 errs=0 | bl
 | Backlight (`b`) | duty cycles 255 → 153 → 77 → 26 and back, visible on the panel |
 | Test pattern (`p`) | 8 colour bars + white frame on the panel instead of the camera |
 | After the register-address fix | `init=1 live=1 fps=30`, `underruns=0`; dumps 1.2 s apart differ, frozen dumps identical — `docs/frame_live.png` is one of them |
+| Processing stages | all four selected in turn with `s`: `lut point op`, `win3x3`, `histogram`, `segment` — 30 fps camera, 60 Hz panel, **0 underruns and 0 AXI errors** over 12 992 panel frames |
+| Stage statistics | every stage's `status_ext` moves and agrees with the frame buffer: histogram reported mean luma 4 and 99th percentile 13 while a dump of the same scene gave 7.8 and 21; the LUT stage's invert mode summed with a bypass dump to 64 585 of the 65 535 an exact per-pixel complement gives, the 1.2 % being the sensor's own auto-exposure drifting between the two captures |
 
 The camera was lying on the desk a few centimetres from a tangle of cables, so the
 picture is an out-of-focus close-up and the room is dim: `docs/frame.png` is the raw
 dump, `docs/frame_boost.png` the *same* dump with a 3.2× gain and 0.65 gamma purely to
 make it easier to look at.
+
+Note that the OV5640 runs with its own auto-exposure and auto-white-balance enabled
+by the register table, so the scene brightness moves under the PL's feet between
+captures (over two minutes the mean packed pixel went from 937 to 24 568 as the
+sensor converged on a dark scene). That is worth knowing before reading anything
+into a single frame dump, and it is why the histogram stage *reports* exposure
+(`stat`) instead of closing a loop on the sensor.
 
 ## Design notes
 
