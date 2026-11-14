@@ -235,10 +235,40 @@ module ov5640_top #(
     wire        stage_eol;
     wire [31:0] stage_stat;
 
-    // slot 1 is the raw stream here, so the foundation build is safe with any
-    // selection; the tier branches replace this instance with real stages
+    // the parameters stage_mux hands to the selected stage, frame-stable
+    wire [15:0] stage_param;
+    wire [ 7:0] stage_knob;
+
+    // ---- slot 1: point operations through a lookup table (sel = 1) ----------
+    wire [63:0] lut_data;
+    wire        lut_valid;
+    wire        lut_sof;
+    wire        lut_eol;
+    wire [31:0] lut_stat;
+
+    stage_lut #(
+        .WORDS_PER_LINE (WORDS_PER_LINE),
+        .LINES_PER_FRAME(V_ACTIVE)
+    ) u_stage_lut (
+        .clk    (cam_pclk),
+        .rst_n  (cam_rst_n),
+        .s_data (cam_word),
+        .s_valid(cam_word_valid),
+        .s_sof  (cam_word_first),
+        .s_eol  (cam_weol),
+        .m_data (lut_data),
+        .m_valid(lut_valid),
+        .m_sof  (lut_sof),
+        .m_eol  (lut_eol),
+        .param  (stage_param),
+        .knob   (stage_knob),
+        .stat   (lut_stat)
+    );
+
+    // a slot that is not populated is fed the raw stream, so any ctrl[4:2]
+    // value is safe and the picture never depends on an unwritten stage
     stage_mux #(
-        .NUM_STAGES(1)
+        .NUM_STAGES(4)
     ) u_stage_mux (
         .clk       (cam_pclk),
         .rst_n     (cam_rst_n),
@@ -246,11 +276,11 @@ module ov5640_top #(
         .s_valid   (cam_word_valid),
         .s_sof     (cam_word_first),
         .s_eol     (cam_weol),
-        .st_data   (cam_word),
-        .st_valid  (cam_word_valid),
-        .st_sof    (cam_word_first),
-        .st_eol    (cam_weol),
-        .st_stat   (32'd0),
+        .st_data   ({cam_word,       cam_word,       cam_word,       lut_data}),
+        .st_valid  ({cam_word_valid, cam_word_valid, cam_word_valid, lut_valid}),
+        .st_sof    ({cam_word_first, cam_word_first, cam_word_first, lut_sof}),
+        .st_eol    ({cam_weol,       cam_weol,       cam_weol,       lut_eol}),
+        .st_stat   ({32'd0,          32'd0,          32'd0,           lut_stat}),
         .sel       (ctrl[4:2]),
         .param     (ctrl[31:16]),
         .knob      ({5'd0, ctrl[7:5]}),
@@ -260,8 +290,8 @@ module ov5640_top #(
         .m_valid   (stage_valid),
         .m_sof     (stage_sof),
         .m_eol     (stage_eol),
-        .s_param   (),
-        .s_knob    (),
+        .s_param   (stage_param),
+        .s_knob    (stage_knob),
         .stat      (stage_stat)
     );
 
