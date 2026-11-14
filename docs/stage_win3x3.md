@@ -11,9 +11,9 @@ words.  Stage slot `sel = 2`.
 | Module | `stage_win3x3` |
 | Parameter | `WORDS_PER_LINE` — 200 in the camera pipeline (the default), 8 in the testbench |
 | Clock domain | `cam_pclk` (≈ 42 MHz), asynchronous active-low reset |
-| Throughput | one word every eight clocks (seven are used) |
+| Throughput | one word every eight clocks (all eight phases are used) |
 | Latency | **2·WORDS_PER_LINE + 4 words** — 404 words = two lines + four words at 200 words/line |
-| Storage | 3 × BRAM18 (two history rows plus the row that is being overwritten) |
+| Storage | 3 × BRAM36 (one per cached row; a 66-bit word does not fit a RAMB18 port) |
 | Border policy | **clamp / duplicate** on all four sides |
 
 The window for the four pixels of a word covers input columns `4x-1 … 4x+4`
@@ -27,8 +27,8 @@ rows.  Both of those facts drive the architecture below.
 The stage emits output row `y` while input row `y+2` is arriving.  That row
 `y+2` must not overwrite the rows the window still needs: the window is
 `y-1, y, y+1`, so three rows have to be live at once.  The buffer that holds
-`y-1` is the one being overwritten by `y+2`; it is read in phases 0 and 2 and
-written in phase 3, so the read always sees the old row `y-1`.
+`y-1` is the one being overwritten by `y+2`; it is read in phases 0 and 1 and
+written in phase 2, so the read always sees the old row `y-1`.
 
 ```
      line buffers (each WORDS_PER_LINE × 66 bit)
@@ -44,32 +44,47 @@ written in phase 3, so the read always sees the old row `y-1`.
 With only two buffers and the current input row, the middle of the three
 available rows is `y+1`, which gives a one-line latency.  Two whole lines of
 latency, as required by the tier contract, therefore need three rows of cache:
-2 × BRAM18 would be a one-line design.  At 200 × 66 each BRAM18 is used at
-256 × 72, so the stage costs 1.5 BRAM36 tiles.
+2 × BRAM would be a one-line design.  A 66-bit word is wider than a RAMB18
+port (36 bits), so each cached row is one RAMB36 in 256 × 72 mode and the stage
+costs 3 BRAM36 tiles.
 
 The ring index `wr` advances once per input line and is **not** reset at a frame
 tag, so the three-buffer rotation continues across the frame boundary; that is
 what lets the last two rows of frame *k* be produced from the first rows of
 frame *k+1*.  The border clamp then hides the rows that do not exist.
 
-### 1.2 Word granularity and the seven-phase schedule
+### 1.2 Word granularity and the three-stage pixel pipeline
 
 Each line buffer stores `{sof, eol, 4 pixels}` (66 bits).  The tags live in the
 same words as the pixels, so they cannot drift from the data.
 
-A word is processed in seven of the eight available `cam_pclk` cycles:
+A word arrives every eight `cam_pclk` cycles.  The address/setup work uses the
+first three cycles; the four pixels then pass through three arithmetic stages,
+one pixel per cycle, overlapping (P1 of pixel *p+1* runs while P2 of pixel *p*
+and P3 of pixel *p−1* run):
 
 | Phase | Action |
 |---|---|
 | 0 (the `s_valid` cycle) | drive the line-buffer read address `wx` |
 | 1 | register the three row words at `x`, register their `sof`/`eol`, launch the read at `x+1` |
-| 2 | register pixel 0 of word `x+1` (right-neighbour look-ahead) |
-| 3 | build the six-pixel spans, reload the carries, write word `x` back into the top buffer |
-| 4…7 | compute output pixels 0, 1, 2, 3 — one per clock, through one shared datapath |
+| 2 | assemble the six-pixel spans, reload the carries, write word `x` back, evaluate **P1(pixel 0)** |
+| 3 | **P2(pixel 0)** and **P1(pixel 1)** |
+| 4 | **P3(pixel 0)**, **P2(pixel 1)**, **P1(pixel 2)** |
+| 5 | **P3(pixel 1)**, **P2(pixel 2)**, **P1(pixel 3)** |
+| 6 | **P3(pixel 2)**, **P2(pixel 3)** |
+| 7 | **P3(pixel 3)**; assemble the output word, the statistic and the line ring |
 
-The sorting network (mode 2) and every adder/multiplier therefore exist **once**
-per pixel, not four times per word.  The eighth clock is the margin that lets
-the next word start on the following cycle.
+| Stage | Work |
+|---|---|
+| P1 | window select, channel widening, the three 9-value sums, the nine luminance values, and comparators 1…12 of the 19-comparator median network |
+| P2 | the box-mean product `sum × 57`, comparators 13…19 of the median, min/max (the compare-exchange preserves the multiset), and the Sobel gradients and magnitude |
+| P3 | mean shift + signed bias + clamp, sharpen `5·I − 4·blur`, Sobel gate, mode mux, RGB565 packing, and the per-pixel changed/above flags |
+
+Every combinational cone is bounded by pipeline registers, so no datapath
+reaches across more than one phase.  The sorting network still exists **once**
+per channel, not four times per word, and the 32-bit statistic accumulator only
+ever sees registered per-pixel flags: one 3-bit sum and one 16-bit saturating
+add per word.
 
 The buffers are addressed by the word column `wx` produced by `img_geom` on the
 *input* stream.  `wx` holds while `valid` is low, so horizontal blanking simply
@@ -197,10 +212,11 @@ nothing and stays 0.
 
 Per channel, the median of the nine widened 8-bit values.  It is computed with
 the 19-comparator Smith network (the one used in the XC4000E application note),
-which is less than a full sort and is shared by the four output pixels over the
-four pixel phases.  The network was checked against a full sort for 200 000
-random 9-tuples before it was committed, and the testbench's reference model
-uses a bubble sort rather than the same network, so a tapping error cannot hide.
+which is less than a full sort.  The network is instantiated once per channel
+and split across the pipeline: comparators 1…12 run in P1 and 13…19 in P2.  The
+network was checked against a full sort for 200 000 random 9-tuples before it
+was committed, and the testbench's reference model uses a bubble sort rather
+than the same network, so a tapping error cannot hide.
 
 ### Mode 3 — erode (minimum) and mode 4 — dilate (maximum)
 
@@ -246,29 +262,54 @@ offered frame tag while the stage is still two lines behind, so the console
 normally displays the statistic of the frame that has just left the stage, which
 is the frame the picture being displayed was built from.
 
-## 6. Resource estimate
+## 6. Resource use and timing (measured)
 
-These are paper estimates; no synthesis was run (the verification for this tier
-is simulation only, per the task).
+Synthesis, place and route: Vivado 2023.2, `xc7z020clg400-1`, full four-stage
+design (`ps/build_hw.tcl`, `impl_1` routed), instance
+`design_1_i/cam_top_0/inst/u_stage_win3x3`.
 
-| Block | LUTs (est.) | Note |
+| Resource | This stage | Whole design |
 |---|---|---|
-| shared control, buffer muxes, 6-pixel span muxes, output aligner, statistic | ~900 | 3 BRAM18 for the rows |
+| Slice LUTs | **3 227** (3 162 logic + 65 SRL) | 15 269 (28.70 %) |
+| Slice registers | **1 209** | 24 144 (22.69 %) |
+| Block RAM | **3 × RAMB36** | 4 tiles (3 RAMB36 + 2 RAMB18) |
+| DSP48E1 | **3** | 12 |
+
+A 66-bit-wide, 200-deep row does not fit in a RAMB18: the widest RAMB18 port is
+36 bits.  Each row is therefore one RAMB36 in 256 × 72 mode, and the three rows
+cost three RAMB36 tiles.  (The first estimate of 1.5 tiles assumed a 64-bit word
+could be packed into an 18 Kb block; the tool correctly uses a 36 Kb block.)
+The three DSP48s come from the constant multiplications in the datapath; the
+rest of the luma and sharpen arithmetic was mapped to LUT logic.
+
+| Timing | Value |
+|---|---|
+| camera_pclk WNS / WHS | **+4.174 ns / +0.028 ns** (42 MHz, 23.810 ns period) |
+| whole design WNS / WHS | +2.495 ns / +0.021 ns |
+| camera_pclk failing endpoints | **0** of 23 941 |
+
+The worst camera_pclk path is now in `u_stage_hist` (the tier-3 stage), not
+here: every path in this stage has at least 4.17 ns of setup margin.  The
+whole-design WNS is a control-to-FIFO path (`axi_gpio_ctrl` → `u_disp_fifo`),
+also unrelated to this stage.  Before the pipeline split the stage alone had
+WNS −8.331 ns, TNS −338.6 ns and 99 failing endpoints, all through the
+9-way-sum / `×57` / statistic chain.
+
+The cost is spread across the three pipeline stages (P1 sums, luma and the
+first half of the median; P2 the product, the second half, min/max and the
+gradients; P3 mean, sharpen, mode mux and packing).  Every mode is built because
+`knob` is a runtime control.  The table below is the incremental estimate of
+what each mode contributes to the measured total of 3 227 LUTs:
+
+| Mode block | Approx. LUTs | Note |
+|---|---|---|
+| shared control, buffer muxes, 6-pixel span muxes, output aligner, statistic | ~900 | 3 BRAM36 for the rows |
 | mode 0 / 6 / 7 box mean | ~370 | 3 sum trees, 3 constant ×57, bias + clamp |
 | mode 1 Sobel | ~540 | 9 lumas, gradients, magnitude, gate |
-| mode 2 median | ~900 | 3 channels × 19 comparators, shared over phases |
+| mode 2 median | ~900 | 3 channels × 19 comparators, split P1/P2 |
 | mode 3 erode | ~190 | 3 channels × 8 comparators |
 | mode 4 dilate | ~190 | 3 channels × 8 comparators |
 | mode 5 sharpen | ~150 | reuses the mode-0 mean |
-| **total (all modes built)** | **~3.2 k LUT** | `knob` is a runtime control, so every mode exists in the bitstream |
-| Block RAM | 3 × BRAM18 = 1.5 BRAM36 tiles | 200 × 66 rounds to 256 × 72 |
-| DSP48 | 0 required | up to ~6 if the tool maps the constant multiplies (×57, ×77, ×150, ×29, ×5/×4) to DSP |
-| Registers | ~470 | output aligner 4 × 67 plus pipeline |
-
-The design currently uses 14.6 % of the 53 200 LUTs and 0.5 of 140 BRAM36
-tiles, so this stage brings it to about 11 k LUTs (≈ 21 %) and 2 BRAM36 tiles;
-it is well inside the device.  The per-mode rows are the incremental cost of
-each mode in the shared datapath, not the cost of a build with only that mode.
 
 ## 7. Why the 2-pixel (32-bit) carry exists
 
@@ -281,9 +322,10 @@ previous word's upper half, pixels 2 and 3 — and uses its high pixel
 
 The off-by-two trap is a one-word shift of that carry:
 
-* consume the carry at phase 3, **then** reload it from the word just read at
-  the same clock edge; reloading one phase earlier (or in phase 1) makes the
-  whole window one pixel wider to the left on every word;
+* consume the carry in phase 2 (P1 of pixel 0 reads the spans before they are
+  registered), **then** reload it from the word just read at the same clock
+  edge; reloading one phase earlier (or in phase 1) makes the whole window one
+  pixel wider to the left on every word;
 * the left neighbour is pixel **3** of the previous word (`carry[31:16]`), not
   pixel 2; using the low half shifts the image by one pixel;
 * at `x = 0` the carry must be the clamp `{p0,p0}`, not the previous line's last
@@ -490,9 +532,10 @@ ends with `all simulations passed`.
 
 ### Limits
 
-* The stage assumes the contract's one word per eight `cam_pclk` cycles.  It
-  uses seven of the eight; a source that presented two words closer than eight
-  clocks would need the datapath split over two pipelines (or a wider parallel
-  network) rather than the phase-shared one.
-* Only simulation was run for this tier; no synthesis, implementation, board or
-  hardware access.  The resource table above is an estimate.
+* The stage assumes the contract's one word per eight `cam_pclk` cycles and uses
+  all eight phases.  A source that presented two words closer than eight clocks
+  would need a fourth pipeline lane (or a wider parallel network) rather than
+  the overlapped P1/P2/P3 schedule.
+* Synthesis, place and route were run on the full four-stage design after this
+  change: `IMPL STATUS: write_bitstream Complete!`, camera_pclk WNS +4.174 ns,
+  whole-design WNS +2.495 ns, WHS +0.021 ns (see section 6).
