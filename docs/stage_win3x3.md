@@ -116,6 +116,16 @@ clock.  The word assembled at phase 7 of word 57 is emitted from the four-slot
 aligner when word 61 reaches phase 7, which is the documented two lines plus
 four words.
 
+The same schedule against the 23.81 ns clock, before and after the retiming that
+made this stage close timing, is drawn in
+[`win3x3_pipeline_timing.png`](win3x3_pipeline_timing.png): the original shipped
+one pixel through the whole chain per phase and the 32.20 ns cone crossed the
+next clock edge by 8.33 ns; the retimed version overlaps three pixels in three
+stages and every path in the stage is inside a clock period.  The figure is
+built from the post-route numbers — 32.20 ns from the routed report, and the
+19.64 ns upper bound on the retimed stage is `23.81 − 4.174`, the slack of the
+worst `camera_pclk` path, which by then had moved to `stage_hist`.
+
 Concrete arithmetic for pixel 229 (the second pixel of that word), mode 0.  Its
 nine widened R-channel neighbours are
 

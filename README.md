@@ -348,6 +348,8 @@ levels with a phase register driving ~11 600 loads, for **WNS −8.331 ns** with
 failing endpoints. It is now a three-stage per-pixel pipeline overlapped across
 phases 2..7 of the eight-clock word period, with identical latency and behaviour.
 Every other stage closed timing as written.
+`docs/win3x3_pipeline_timing.png` draws the two schedules against the 23.81 ns
+clock; `docs/stage_win3x3.md` walks one word through them with the arithmetic.
 
 (The 100 critical warnings in the build log are the PS7 IP's own XDC trying to
 constrain pins that the block design drives; they are present in every build of
