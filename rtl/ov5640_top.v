@@ -318,6 +318,32 @@ module ov5640_top #(
         .stat   (hist_stat)
     );
 
+    // ---- slot 4: colour segmentation + bounding boxes (sel = 4) ------------
+    wire [63:0] seg_data;
+    wire        seg_valid;
+    wire        seg_sof;
+    wire        seg_eol;
+    wire [31:0] seg_stat;
+
+    stage_seg #(
+        .WORDS_PER_LINE(WORDS_PER_LINE),
+        .LINES         (V_ACTIVE)
+    ) u_stage_seg (
+        .clk    (cam_pclk),
+        .rst_n  (cam_rst_n),
+        .s_data (cam_word),
+        .s_valid(cam_word_valid),
+        .s_sof  (cam_word_first),
+        .s_eol  (cam_weol),
+        .m_data (seg_data),
+        .m_valid(seg_valid),
+        .m_sof  (seg_sof),
+        .m_eol  (seg_eol),
+        .param  (stage_param),
+        .knob   (stage_knob),
+        .stat   (seg_stat)
+    );
+
     // a slot that is not populated is fed the raw stream, so any ctrl[4:2]
     // value is safe and the picture never depends on an unwritten stage
     stage_mux #(
@@ -329,11 +355,11 @@ module ov5640_top #(
         .s_valid   (cam_word_valid),
         .s_sof     (cam_word_first),
         .s_eol     (cam_weol),
-        .st_data   ({cam_word,       hist_data,      win_data,       lut_data}),
-        .st_valid  ({cam_word_valid, hist_valid,     win_valid,      lut_valid}),
-        .st_sof    ({cam_word_first, hist_sof,       win_sof,        lut_sof}),
-        .st_eol    ({cam_weol,       hist_eol,       win_eol,        lut_eol}),
-        .st_stat   ({32'd0,          hist_stat,      win_stat,       lut_stat}),
+        .st_data   ({seg_data,       hist_data,      win_data,       lut_data}),
+        .st_valid  ({seg_valid,      hist_valid,     win_valid,      lut_valid}),
+        .st_sof    ({seg_sof,        hist_sof,       win_sof,        lut_sof}),
+        .st_eol    ({seg_eol,        hist_eol,       win_eol,        lut_eol}),
+        .st_stat   ({seg_stat,       hist_stat,      win_stat,       lut_stat}),
         .sel       (ctrl[4:2]),
         .param     (ctrl[31:16]),
         .knob      ({5'd0, ctrl[7:5]}),
