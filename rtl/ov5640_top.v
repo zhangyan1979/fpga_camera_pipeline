@@ -171,11 +171,17 @@ module ov5640_top #(
     // =========================================================================
     wire cam_init_done;
 
+    // Flip and mirror are done in the sensor, not in the PL: register 0x3820
+    // gains VFLIP and 0x3821 loses HMIRROR, so the OV5640 reads its pixel array
+    // out in the opposite order and the whole datapath downstream - packing,
+    // frame tag, stages, frame buffers, panel timing - is bit-for-bit unchanged.
+    // Doing it in the PL would need a whole frame buffered, because a 180 degree
+    // rotation reverses the line order as well as the pixel order.
     ov5640_init #(
         .IMAGE_WIDTH    (H_ACTIVE),
         .IMAGE_HEIGHT   (V_ACTIVE),
-        .IMAGE_FLIP_EN  (1'b0),
-        .IMAGE_MIRROR_EN(1'b0)
+        .IMAGE_FLIP_EN  (1'b1),
+        .IMAGE_MIRROR_EN(1'b1)
     ) u_ov5640_init (
         .clk      (clk50),
         .rst_n    (sys_rst_n),

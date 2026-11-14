@@ -434,6 +434,17 @@ address (one byte for the SiI9022A, two for the OV5640) and data.  The vendor re
 path, the ov7725/JPEG table options and the unused camera reset/power-down pins
 are gone, and `sim/tb_sccb.v` checks the resulting protocol against a slave model.
 
+**Orientation is done in the sensor.** `ov5640_init` is instantiated with
+`IMAGE_FLIP_EN` and `IMAGE_MIRROR_EN` set, which patches table entries 211/212:
+register `0x3820` goes from `0x40` to `0x47` (VFLIP) and `0x3821` from `0x07` to
+`0x00` (HMIRROR), so the OV5640 reads its array out in the opposite order and the
+image is rotated 180°.  Nothing downstream changes — the packing, the frame tag,
+the stages, the frame buffers and the panel timing are bit-for-bit identical,
+because the sensor's DVP timing does not move.  Rotating in the PL instead would
+mean three separate address reversals in `fb_ddr` (line order, word order within
+a line, pixel order within a word), each of which has to be re-proved against the
+tearing and column-alignment tests; the sensor does it for free.
+
 **A NACK-free init does not mean the right registers were written.** The sensor
 acknowledges every well-formed byte on its device address, so an init that
 completes (and reports `init=1`) can still have addressed the wrong register —
