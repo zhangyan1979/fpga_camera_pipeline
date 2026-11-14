@@ -70,6 +70,9 @@ cam init=1 live=1 fps=30 frames=67 | panel frames=141 underruns=0 errs=0 | bl=10
 |---|---|
 | `p` | test pattern (8 colour bars + white frame) instead of the camera |
 | `f` | freeze / resume the frame buffer |
+| `s` | next processing stage (0 = bypass) |
+| `k` | next stage mode |
+| `+` / `-` | stage parameter up / down |
 | `b` | cycle the backlight 100 / 60 / 30 / 10 % |
 | `i` | dump the control and status words, resolution and buffer addresses |
 | `h` | help |
@@ -112,6 +115,14 @@ deliberately split so a processing stage has three clean insertion points.
 | inside `fb_ddr`, between the read burst and `disp_data` | AXI 50 MHz | 64-bit word stream out of DDR | per-word effects on the display side, and anything that must keep the stored frame raw |
 | inside `lcd_display`, before `lcd_rgb` | pixel 33.3 MHz | one pixel | cheap overlays (freeze marker, histogram, crosshair, test patterns) |
 
+The first of these is now a **stage slot**: stages are word-stream processors
+that run in parallel, are selected with `ctrl[4:2]`, and are swapped live from
+the console.  `stage_mux` gives every stage frame-stable `param`/`knob` values, a
+tear-free hand-over at the frame boundary, warm-up gating and a per-frame
+statistic on `status_ext`.  **`docs/stage_contract.md` is the reference**: the
+interface, the five invariants, the coordinate regeneration trick, the budget and
+the test recipe.
+
 Invariants a write-side stage must keep, otherwise the DDR engine's address
 counter drifts and the picture slides:
 
@@ -120,13 +131,11 @@ counter drifts and the picture slides:
 * word alignment is **4 pixels**, restarted at every line and frame (the packer
   does this; a filter that delays pixels must delay the tag by the same amount).
 
-For a mode switch, wire it to a reserved control bit (`ctrl[2]` … `ctrl[7]`) and
-report the active mode in a reserved status bit (`status_cam[7:2]`), then add a
-console key next to `p`/`f`/`b` in `ps/app/main.c`.
-
-Line-buffer budget at the camera rate: 4 pixels/cycle, 800 pixels/line = 200
-words/line, so a 3×3 kernel needs two line buffers (≈ 3 BRAM36) and about
-1 500 LUTs for three 8-bit channels.
+One word leaves the camera every eight `cam_pclk` cycles, so a camera-side stage
+has eight clocks of slack per word — enough to share a sorting network between
+the four pixels of a word.  At the camera rate a 3×3 stage needs two line buffers
+(1 BRAM18 each) and a few hundred LUTs for median/morphology, or 3–14 DSPs for a
+separable linear filter.
 
 ## Clock domains
 
@@ -147,6 +156,8 @@ MMCM: VCO 1200 MHz (M = 24), CLKOUT0 /36, CLKOUT1 /50.
 | `rtl/ov5640_capture.v` | DVP byte pairing, 800×480 clipping, 4-pixel packer, frame tag |
 | `rtl/afifo.v` | parameterised dual-clock show-ahead FIFO (Gray pointers), 64/65-bit use |
 | `rtl/fb_ddr.v` | AXI4 master: tag-driven DDR write engine + blanking-time read engine |
+| `rtl/stage_mux.v` | stage slot: selects one processing stage, gives it frame-stable parameters, moves its statistic back to the PS |
+| `rtl/img_geom.v` | word-stream geometry (end of line, word column, line index) regenerated on a delayed stream |
 | `rtl/lcd_display.v` | 1056×526 timing, RGB565 output, reload handshake, underrun counter |
 | `rtl/clk_gen.v` | MMCM 33.333 MHz + 24 MHz |
 | `rtl/ov5640_init.v`, `rtl/i2c_control.v`, `rtl/i2c_bit_shift.v`, `rtl/ov5640_init_table_rgb.v` | OV5640 SCCB bring-up: 21 ms power-up wait, 252-entry write sequence, 5 ms post-reset delay (see Provenance) |
@@ -161,6 +172,7 @@ MMCM: VCO 1200 MHz (M = 24), CLKOUT0 /36, CLKOUT1 /50.
 | `ps/impl_iterate.tcl` | re-run place & route on the existing project (iteration helper) |
 | `ps/app/main.c` | status console and key commands |
 | `sim/tb_pipeline.v` | self-checking end-to-end video test (reduced geometry + AXI memory model) |
+| `sim/tb_stage_contract.v` | stage slot: tags and word counts through a stage, hand-over between stages, warm-up gating, statistic transfer |
 | `sim/tb_lcd_timing.v` | full-size panel timing check |
 | `sim/tb_sccb.v` | SCCB write-path check: byte sequence, ACK/NACK, delay, SCL rate |
 | `sim/tb_init_seq.v` | register-load check: every byte of both ROM sequences compared with the table |
@@ -170,6 +182,7 @@ MMCM: VCO 1200 MHz (M = 24), CLKOUT0 /36, CLKOUT1 /50.
 | `tools/verify.ps1` | hardware self-check: live-frame and freeze tests |
 | `tools/frame_stats.py` | frame-dump statistics (mean, dark fraction, row variation, A/B compare) |
 | `docs/` | console transcripts and frame dumps rendered to PNG |
+| `docs/stage_contract.md` | the processing-stage interface, its five invariants and the test recipe |
 
 ## Build
 

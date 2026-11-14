@@ -13,13 +13,23 @@
 //  Control word (PS -> PL)                  Status words (PL -> PS)
 //    ctrl[0]      test pattern              status_cam[0]      camera init done
 //    ctrl[1]      freeze frame              status_cam[1]      camera streaming
-//    ctrl[7:2]    reserved                  status_cam[15:8]   camera fps
+//    ctrl[4:2]    processing stage          status_cam[7:2]    reserved
+//    ctrl[7:5]    stage mode                status_cam[15:8]   camera fps
 //    ctrl[15:8]   backlight duty 0..255     status_cam[31:16]  camera frames
-//    ctrl[31:16]  reserved
+//    ctrl[31:16]  stage parameter
 //                                           status_disp[15:0]  panel frames
-//                                           status_disp[23:16] frames with a
-//                                                              missing pixel
+//    stage 0 = bypass (raw camera words)    status_disp[23:16] frames with a
+//    stage 1..7 = populated slots                         missing pixel
 //                                           status_disp[31:24] AXI error count
+//
+//                                           status_ext[31:0]   the selected
+//                                                              stage's statistic
+//
+//  Stages are word-stream processors sitting between ov5640_capture and the
+//  camera -> AXI FIFO.  One is selected into the frame-buffer path; see
+//  docs/stage_contract.md for the interface and the invariants a stage must
+//  keep (96 000 words per frame, 200 words per line, the frame tag delayed with
+//  the data).
 //
 //  The 16-bit panel value is {R[4:0], G[5:0], B[4:0]} straight onto the TFT RGB
 //  pins, which the SiI9022A (same pins) also converts to HDMI.
@@ -37,6 +47,7 @@ module ov5640_top #(
     input  wire [31:0] ctrl,            // AXI GPIO from the PS
     output wire [31:0] status_cam,
     output wire [31:0] status_disp,
+    output wire [31:0] status_ext,      // statistic of the selected stage
     // ---- AXI4 master -> S_AXI_HP0 -------------------------------------------
     output wire [ 3:0] m_axi_awid,
     output wire [31:0] m_axi_awaddr,
@@ -100,6 +111,9 @@ module ov5640_top #(
 );
 
     localparam [26:0] HDMI_DELAY = 27'd50_000_000;   // 1 s at 50 MHz
+
+    // one word carries four pixels, so a line is H_ACTIVE / 4 words
+    localparam integer WORDS_PER_LINE = H_ACTIVE / 4;
 
     // =========================================================================
     //  Clocks and resets
@@ -192,6 +206,66 @@ module ov5640_top #(
     );
 
     // =========================================================================
+    //  Processing stage slot (camera PCLK domain)
+    // =========================================================================
+    // A stage is a word-stream processor: 64 bits = four RGB565 pixels, plus the
+    // frame tag and the line-end marker, all delayed together by the stage's own
+    // latency.  Stages run in parallel and stage_mux selects one into the
+    // frame-buffer path, so a control write compares two algorithms on the same
+    // live picture and a broken stage cannot stall the others.
+    wire        cam_weol;
+    wire [ 8:0] cam_wx;
+    wire [ 8:0] cam_wy;
+
+    img_geom #(
+        .WORDS_PER_LINE(WORDS_PER_LINE)
+    ) u_geom (
+        .clk  (cam_pclk),
+        .rst_n(cam_rst_n),
+        .sof  (cam_word_first),
+        .valid(cam_word_valid),
+        .eol  (cam_weol),
+        .wx   (cam_wx),
+        .wy   (cam_wy)
+    );
+
+    wire [63:0] stage_word;
+    wire        stage_valid;
+    wire        stage_sof;
+    wire        stage_eol;
+    wire [31:0] stage_stat;
+
+    // slot 1 is the raw stream here, so the foundation build is safe with any
+    // selection; the tier branches replace this instance with real stages
+    stage_mux #(
+        .NUM_STAGES(1)
+    ) u_stage_mux (
+        .clk       (cam_pclk),
+        .rst_n     (cam_rst_n),
+        .s_data    (cam_word),
+        .s_valid   (cam_word_valid),
+        .s_sof     (cam_word_first),
+        .s_eol     (cam_weol),
+        .st_data   (cam_word),
+        .st_valid  (cam_word_valid),
+        .st_sof    (cam_word_first),
+        .st_eol    (cam_weol),
+        .st_stat   (32'd0),
+        .sel       (ctrl[4:2]),
+        .param     (ctrl[31:16]),
+        .knob      ({5'd0, ctrl[7:5]}),
+        .clk_ctrl  (clk50),
+        .rst_ctrl_n(sys_rst_n),
+        .m_data    (stage_word),
+        .m_valid   (stage_valid),
+        .m_sof     (stage_sof),
+        .m_eol     (stage_eol),
+        .s_param   (),
+        .s_knob    (),
+        .stat      (stage_stat)
+    );
+
+    // =========================================================================
     //  Camera -> AXI clock FIFO
     // =========================================================================
     // bit 64 travels with the pixels: "this word starts a camera frame"
@@ -206,8 +280,8 @@ module ov5640_top #(
     ) u_cam_fifo (
         .wr_clk  (cam_pclk),
         .wr_rst_n(cam_rst_n),
-        .wr_data ({cam_word_first, cam_word}),
-        .wr_en   (cam_word_valid),
+        .wr_data ({stage_sof, stage_word}),
+        .wr_en   (stage_valid),
         .wr_full (),
         .wr_level(),
         .rd_clk  (clk50),
@@ -419,6 +493,7 @@ module ov5640_top #(
 
     assign status_cam  = {cam_frames, cam_fps, 6'd0, cam_streaming, cam_init_done};
     assign status_disp = {axi_errs, underruns_s2, disp_frames_s2};
+    assign status_ext  = stage_stat;
 
     // =========================================================================
     //  Board LED: slow blink while video is running, fast blink otherwise

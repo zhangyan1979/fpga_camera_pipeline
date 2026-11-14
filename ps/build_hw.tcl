@@ -13,19 +13,9 @@ set constr [file join $root constr]
 
 create_project camera_pipeline [file join $here build_hw] -part xc7z020clg400-1 -force
 
-add_files -norecurse [list \
-    [file join $rtl ov5640_top.v] \
-    [file join $rtl clk_gen.v] \
-    [file join $rtl ov5640_capture.v] \
-    [file join $rtl afifo.v] \
-    [file join $rtl fb_ddr.v] \
-    [file join $rtl lcd_display.v] \
-    [file join $rtl ov5640_init.v] \
-    [file join $rtl i2c_control.v] \
-    [file join $rtl i2c_bit_shift.v] \
-    [file join $rtl ov5640_init_table_rgb.v] \
-    [file join $rtl sii9022_init.v] \
-    [file join $rtl sii9022_init_table.v] ]
+# every RTL file in rtl/ is part of the design: adding a processing stage means
+# dropping its file in, not editing this list
+add_files -norecurse [lsort [glob -nocomplain [file join $rtl *.v]]]
 
 # ---- PS7 with the vendor board preset ---------------------------------------
 source [file join $here ps7-preset.tcl]
@@ -53,6 +43,11 @@ set_property -dict [list \
     CONFIG.C_ALL_INPUTS_2 {1} \
 ] [get_bd_cells axi_gpio_status]
 
+# the image-processing stage's statistic (see docs/stage_contract.md)
+create_bd_cell -type ip -vlnv xilinx.com:ip:axi_gpio:2.0 axi_gpio_ext
+set_property -dict [list CONFIG.C_GPIO_WIDTH {32} CONFIG.C_ALL_INPUTS {1}] \
+    [get_bd_cells axi_gpio_ext]
+
 # ---- PL half ----------------------------------------------------------------
 create_bd_cell -type module -reference ov5640_top cam_top_0
 
@@ -67,10 +62,11 @@ connect_bd_net [get_bd_pins ps7/FCLK_RESET0_N] [get_bd_pins rst_50m/ext_reset_in
 
 # ---- AXI-Lite: GP0 -> the two GPIOs -----------------------------------------
 create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smc_lite
-set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {2}] [get_bd_cells smc_lite]
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {3}] [get_bd_cells smc_lite]
 connect_bd_intf_net [get_bd_intf_pins ps7/M_AXI_GP0]    [get_bd_intf_pins smc_lite/S00_AXI]
 connect_bd_intf_net [get_bd_intf_pins smc_lite/M00_AXI] [get_bd_intf_pins axi_gpio_ctrl/S_AXI]
 connect_bd_intf_net [get_bd_intf_pins smc_lite/M01_AXI] [get_bd_intf_pins axi_gpio_status/S_AXI]
+connect_bd_intf_net [get_bd_intf_pins smc_lite/M02_AXI] [get_bd_intf_pins axi_gpio_ext/S_AXI]
 
 # ---- AXI4 master (camera frame buffer engine) -> S_AXI_HP0 ------------------
 create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smc_hp
@@ -81,10 +77,12 @@ connect_bd_intf_net [get_bd_intf_pins smc_hp/M00_AXI]  [get_bd_intf_pins ps7/S_A
 # ---- 50 MHz domain wiring ---------------------------------------------------
 foreach p {ps7/M_AXI_GP0_ACLK ps7/S_AXI_HP0_ACLK \
            axi_gpio_ctrl/s_axi_aclk axi_gpio_status/s_axi_aclk \
+           axi_gpio_ext/s_axi_aclk \
            smc_lite/aclk smc_hp/aclk cam_top_0/clk50} {
     connect_bd_net [get_bd_pins ps7/FCLK_CLK0] [get_bd_pins $p]
 }
 foreach p {axi_gpio_ctrl/s_axi_aresetn axi_gpio_status/s_axi_aresetn \
+           axi_gpio_ext/s_axi_aresetn \
            smc_lite/aresetn smc_hp/aresetn} {
     connect_bd_net [get_bd_pins rst_50m/peripheral_aresetn] [get_bd_pins $p]
 }
@@ -94,6 +92,7 @@ connect_bd_net [get_bd_pins ps7/FCLK_RESET0_N] [get_bd_pins cam_top_0/aresetn]
 connect_bd_net [get_bd_pins axi_gpio_ctrl/gpio_io_o]  [get_bd_pins cam_top_0/ctrl]
 connect_bd_net [get_bd_pins cam_top_0/status_cam]     [get_bd_pins axi_gpio_status/gpio_io_i]
 connect_bd_net [get_bd_pins cam_top_0/status_disp]    [get_bd_pins axi_gpio_status/gpio2_io_i]
+connect_bd_net [get_bd_pins cam_top_0/status_ext]     [get_bd_pins axi_gpio_ext/gpio_io_i]
 
 assign_bd_address
 
