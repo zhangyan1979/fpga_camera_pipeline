@@ -68,12 +68,22 @@ somewhere else entirely.
 
 * **Frame-stable parameters.** `sel`, `param` and `knob` come from the AXI clock
   domain. `stage_mux` synchronises them and re-latches them on the *emitted*
-  frame tag, so a stage may use `param` directly without sampling, and a control
-  write in mid-frame cannot split a frame.
+  frame tag, so a control write in mid-frame cannot split a frame.
+  **A stage with latency must sample `param`/`knob` at its own input frame tag
+  and carry the value down its pipeline with the pixels** — the mux's re-latch
+  happens on the emitted tag, which is `latency` words later, so a stage that
+  read `param` combinationally would apply the next frame's setting to the words
+  still inside its pipeline. `stage_lut` (3 words) and `stage_hist` (5 clocks)
+  both do this; it is two flops and it removes a whole class of "the picture
+  changes a frame early" bug.
 * **A hand-over that cannot tear.** When the selection changes, the mux stays
   silent until the newly selected stage produces its own frame tag; that tag
   then starts the next frame at word 0. The camera's vertical blanking is far
-  longer than any stage latency, so nothing is lost.
+  longer than any stage latency, so nothing is lost — except that the frame
+  *before* the switch is short by that stage's latency in words, which for the
+  3×3 stage (404 words) is the bottom two lines of one frame. It is a single
+  frame on a mode change, and `fb_ddr`'s fixed word count keeps it from sliding
+  anything else.
 * **Warm-up gating.** Words before the first frame tag after reset (a stage's
   pipeline is full of junk then) are dropped, so the frame tag still lands on
   offset 0.
