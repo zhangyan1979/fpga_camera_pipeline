@@ -148,6 +148,15 @@ nine widened R-channel neighbours are
   mode mux selects one of those in P3; the arithmetic behind all of them was
   already computed in P1 and P2.
 
+The same pixel is drawn end to end, with the actual RGB565 operands, in
+[`win3x3_pixel229_path.png`](win3x3_pixel229_path.png): the nine-pixel window,
+the sums, the nine luminances, the partially sorted median, the product, the
+min/max, the Sobel gradients, the six mode candidates and the register boundary
+that follows each phase.  One caveat on that figure: its luminance label reads
+`(77R + 150G + 29B) >> 8` and omits the `+128` rounding term that the RTL and
+the Mode 1 formula below both use — with the rounding, the centre pixel's
+luminance is 98, and every value in the figure matches the RTL.
+
 ### 1.4 Output alignment
 
 The computed word goes through a four-slot `{sof, eol, data}` shift register
