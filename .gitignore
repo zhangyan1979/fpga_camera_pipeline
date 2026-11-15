@@ -51,3 +51,7 @@ ps/*.rpt
 Thumbs.db
 desktop.ini
 *~
+
+# python bytecode from the doc generators in tools/
+__pycache__/
+*.pyc

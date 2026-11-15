@@ -46,6 +46,10 @@ The same structure drawn as a schematic — clock domains as lanes, both CDC FIF
 the lane boundaries, the PS7 / DDR3 resources underneath:
 [`docs/camera_pipeline_schematic.png`](docs/camera_pipeline_schematic.png) (vector:
 [`.svg`](docs/camera_pipeline_schematic.svg), redrawn by `tools/make_schematic.py`).
+The same pipeline at **port level** — every block's ports with direction, width and
+the net that lands on each, adjacent blocks wired, everything else joined by name:
+[`docs/camera_pipeline_ports.png`](docs/camera_pipeline_ports.png) (vector:
+[`.svg`](docs/camera_pipeline_ports.svg), `tools/make_port_sheet.py`).
 
 The PS is not in the video path.  It only
 
@@ -208,8 +212,11 @@ MMCM: VCO 1200 MHz (M = 24), CLKOUT0 /36, CLKOUT1 /50.
 | `tools/verify.ps1` | hardware self-check: live-frame and freeze tests |
 | `tools/frame_stats.py` | frame-dump statistics (mean, dark fraction, row variation, A/B compare) |
 | `tools/make_schematic.py` | draws the module schematic (SVG + PNG) from the block structure |
+| `tools/make_port_sheet.py` | draws the port-level sheet: ports, widths, directions, nets |
+| `tools/schematic.py` | Canvas + SVG and PNG backends shared by both sheets |
 | `docs/` | console transcripts and frame dumps rendered to PNG |
 | `docs/camera_pipeline_schematic.svg`, `.png` | module schematic: lanes, video path, CDC FIFOs, PS resources |
+| `docs/camera_pipeline_ports.svg`, `.png` | port-level sheet: every port of every block, and the nets between them |
 | `docs/stage_contract.md` | the processing-stage interface, its five invariants and the test recipe |
 
 ## Build
