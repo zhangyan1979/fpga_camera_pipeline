@@ -42,6 +42,11 @@ because the room is dim — `docs/frame.png` is the unmodified dump.*
      +--> SiI9022A (same pins) -> HDMI
 ```
 
+The same structure drawn as a schematic — clock domains as lanes, both CDC FIFOs on
+the lane boundaries, the PS7 / DDR3 resources underneath:
+[`docs/camera_pipeline_schematic.png`](docs/camera_pipeline_schematic.png) (vector:
+[`.svg`](docs/camera_pipeline_schematic.svg), redrawn by `tools/make_schematic.py`).
+
 The PS is not in the video path.  It only
 
 * runs `ps7_init` (DDR3 controller, clocks, UART1),
@@ -202,7 +207,9 @@ MMCM: VCO 1200 MHz (M = 24), CLKOUT0 /36, CLKOUT1 /50.
 | `tools/serial_send.ps1`, `tools/serial_capture.ps1` | drive / record the console |
 | `tools/verify.ps1` | hardware self-check: live-frame and freeze tests |
 | `tools/frame_stats.py` | frame-dump statistics (mean, dark fraction, row variation, A/B compare) |
+| `tools/make_schematic.py` | draws the module schematic (SVG + PNG) from the block structure |
 | `docs/` | console transcripts and frame dumps rendered to PNG |
+| `docs/camera_pipeline_schematic.svg`, `.png` | module schematic: lanes, video path, CDC FIFOs, PS resources |
 | `docs/stage_contract.md` | the processing-stage interface, its five invariants and the test recipe |
 
 ## Build
