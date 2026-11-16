@@ -19,6 +19,12 @@
 //
 //  Missing pixels (FIFO empty inside the active window) are shown as black and
 //  mark the frame as "underrun"; the counter reports how many frames were hit.
+//
+//  The panel position is exported (px_x / px_y / px_active / frame_start) and an
+//  overlay mask can tint the pixel before the RGB pins: hist_overlay.v uses that
+//  to draw the live histogram over the picture without a second copy of the
+//  timing generator.  With ovl_en low the datapath is bit-for-bit the original
+//  single-register pixel path.
 // =============================================================================
 `timescale 1ns / 1ps
 
@@ -44,6 +50,14 @@ module lcd_display #(
     input  wire        video_valid,     // at least one frame is in DDR
     // mode
     input  wire        test_pattern,
+    // histogram overlay, computed outside this block from px_x / px_y
+    input  wire        ovl_en,
+    input  wire        ovl_hit,
+    // panel position, for the overlay generator
+    output wire [10:0] px_x,
+    output wire [ 9:0] px_y,
+    output wire        px_active,
+    output wire        frame_start,
     // panel
     output reg         lcd_hsync,
     output reg         lcd_vsync,
@@ -100,6 +114,11 @@ module lcd_display #(
     wire [ 9:0] y = v_active ? (v_cnt - V_START) : 10'd0;
 
     wire frame_blank_start = (h_cnt == 11'd0) && (v_cnt == 10'd0);
+
+    assign px_x        = x;
+    assign px_y        = y;
+    assign px_active   = in_active;
+    assign frame_start = frame_blank_start;
 
     // ---- frame-buffer switch ------------------------------------------------
     always @(posedge pix_clk or negedge rst_n) begin
@@ -163,6 +182,19 @@ module lcd_display #(
     wire pixel_missing = in_active && !test_pattern && video_valid &&
                          (sub == 2'd0) && fifo_empty;
 
+    // The pixel that goes to the panel this cycle, before the overlay: the same
+    // value the original single-register path produced, kept combinational so
+    // the overlay blend costs no extra clock of latency against lcd_de.
+    reg [15:0] px_next;
+    always @(*) begin
+        if (!in_active)        px_next = 16'd0;
+        else if (test_pattern) px_next = pattern_px;
+        else if (sub == 2'd0)  px_next = fifo_empty ? 16'd0 : fifo_data[15:0];
+        else                   px_next = hold[31:16];
+    end
+
+    wire ovl_draw = ovl_en && ovl_hit;
+
     always @(posedge pix_clk or negedge rst_n) begin
         if (!rst_n) begin
             sub           <= 2'd0;
@@ -184,24 +216,20 @@ module lcd_display #(
                 frame_valid <= video_valid;
             end
 
-            if (!in_active) begin
-                lcd_rgb <= 16'd0;
-            end else if (test_pattern) begin
-                lcd_rgb <= pattern_px;
-            end else if (sub == 2'd0) begin
-                // first pixel of a new word: pop and reload the hold register
-                sub <= 2'd1;
-                if (!fifo_empty) begin
-                    lcd_rgb <= fifo_data[15:0];
-                    hold    <= fifo_data;
+            if (in_active && !test_pattern) begin
+                if (sub == 2'd0) begin
+                    // first pixel of a new word: pop and reload the hold register
+                    sub <= 2'd1;
+                    if (!fifo_empty) hold <= fifo_data;
                 end else begin
-                    lcd_rgb <= 16'd0;
+                    hold <= {16'd0, hold[63:16]};
+                    sub  <= (sub == 2'd3) ? 2'd0 : (sub + 2'd1);
                 end
-            end else begin
-                lcd_rgb <= hold[31:16];
-                hold    <= {16'd0, hold[63:16]};
-                sub     <= (sub == 2'd3) ? 2'd0 : (sub + 2'd1);
             end
+
+            // overlay mask: keep the pixel's red and blue, saturate its green
+            // channel, so the bar tints the picture instead of replacing it
+            lcd_rgb <= ovl_draw ? {px_next[15:11], 6'h3F, px_next[4:0]} : px_next;
 
             // underrun bookkeeping: count the frames that should have been
             // complete but had a missing pixel

@@ -31,7 +31,13 @@ module stage_hist #(
     output reg         m_valid, m_sof, m_eol,
     input  wire [15:0] param,
     input  wire [ 7:0] knob,
-    output wire [31:0] stat
+    output wire [31:0] stat,
+    // histogram snapshot for the panel overlay (see below)
+    output reg  [ 7:0] ovl_bin,
+    output reg  [15:0] ovl_cnt,
+    output reg         ovl_we,
+    output reg         ovl_bank,
+    output reg         ovl_valid
 );
 ```
 
@@ -204,6 +210,77 @@ The OV5640 takes milliseconds to configure, so the camera cannot produce a word
 during that window; the first frame after reset is still a valid frame, and the
 first *map* is published after it.
 
+## Publishing the bins for the panel overlay
+
+`rtl/hist_overlay.v` draws a live histogram over the picture while this stage is
+the selected slot.  The counts only exist for one moment in a frame — the
+finalise scan — and a second read port on the histogram BRAM would cost a true
+dual-port tile for a diagnostic, so the stage **pushes** each bin out during the
+scan instead:
+
+| port | meaning |
+|---|---|
+| `ovl_we` | one pulse per bin per completed scan (256 pulses) |
+| `ovl_bin[7:0]`, `ovl_cnt[15:0]` | the bin and its completed count, valid with `ovl_we` |
+| `ovl_bank` | the bank the *next* scan fills; the readable bank is its complement |
+| `ovl_valid` | set by the first completed scan, never cleared |
+
+`ovl_we` is driven from the same condition as the scan's clear write, and the
+count published with `fin_bin` is `hist_q` — the value the scan is about to
+consume — so no extra addressing or plumbing is added to the accumulator.
+
+The bank flips on the edge that enters `S_MEAN`, i.e. after the last bin has
+been written; the last write still lands in the old bank because the address is
+built from the pre-edge value.  A frame tag that aborts a scan therefore
+publishes nothing: the overlay keeps the previous completed histogram instead of
+showing a half-written one.
+
+The display side latches the readable bank once per panel frame, in blanking, so
+bars cannot change halfway down the screen.  The histogram on the panel is
+therefore one camera frame old — the same convention as `stat` and the
+equalisation map.
+
+### What the panel draws
+
+`hist_overlay.v` keeps two banks of 256 x 16 counts in one RAMB18 and turns them
+into pixels in the 33.333 MHz pixel domain:
+
+* 256 bars, **three pixels each**, from `x = 16` to `x = 783` (768 = 3 x 256);
+  nothing is drawn in the margins or outside the active window;
+* the graph lives in a **160-pixel band at the bottom** of the screen, so the
+  picture above it stays readable;
+* bar height is a **log scale relative to the frame's own peak bin**: the peak
+  fills the band and each octave below it costs 20 pixels,
+  `h = 160 - 20 * (clz16(count) - clz16(peak))`, with `h = 0` for an empty bin
+  or more than eight octaves below the peak.  An *absolute* scale does not work
+  here: run against a real dump of this camera (mean luma 29, peak 17 430 in
+  bin 8) it drew a solid 150 x 420-pixel green wall, because the room is dark
+  and most pixels really are in the first fifty bins.  Relative scaling keeps
+  the shape of the distribution visible whatever the exposure is;
+* the block outputs a **mask**, not a colour: inside a bar, `lcd_display` keeps
+  the pixel's red and blue and drives its green channel to full scale, so the
+  picture stays visible and tinted green instead of being replaced.  Arithmetic
+  blending was tried first and read as grey — averaging green with a warm, dim
+  picture gives an olive tone, so the bars took the picture's hue instead of the
+  histogram's; a checkerboard dither was tried next and read as a stipple.
+  Saturating only the green channel keeps the tint's hue while the luminance
+  detail of the scene survives.  The absolute numbers stay in `stat[15:0]` on
+  the console rather than as marker lines on the glass, which were hard to read
+  against the bars.
+
+The bin for a pixel is regenerated from `x` with a 3-phase counter (no divider),
+and the RAM address presented for pixel *x* is the bin of pixel *x+1*, so the
+registered RAM output lands on the pixel it belongs to.
+
+The peak is found by the overlay itself: a 258-clock scan of its own bank during
+the panel's blanking (~48 000 clocks long), so `stage_hist` publishes nothing but
+the bins.  One BRAM read and a 16-bit leading-zero encoder sit in the pixel path:
+about 10 ns of a 30 ns period.
+
+The overlay is drawn while the histogram slot is selected (`ctrl[4:2] = 3`) and
+the camera image is showing (not the test pattern).  `ctrl` has no spare bit, so
+the slot itself is the switch.
+
 ## Mean, 99th percentile and saturation
 
 The scan walks bins from 255 down to 0 and keeps `tail` = the number of pixels
@@ -300,6 +377,15 @@ brief forbids it).  The numbers are for the real 200 x 480 instantiation.
 | flip-flops | **~500** | 64-bit input and output words, 32-bit grey accumulator, 3 x 32-bit divider registers, 28+20+20+8 bit statistics, counters, tag pipeline |
 | clock domains | 1 | cam_pclk only; no CDC inside the stage |
 | latency | 5 clocks | less than one 8-clock word period |
+
+The overlay is outside the stage's budget: `hist_overlay.v` adds **one
+RAMB18** (two banks of 256 x 16 in a dual-clock block RAM).  Synthesised
+stand-alone for the xc7z020 it came to **120 LUTs and 66 flip-flops, one RAMB18,
+no latches, no DSP, no errors** with the marker-line version; dropping the
+markers removes a couple of comparators, and the leading-zero height, the
+3-phase bin counter, the blanking-time peak scan and the bank handshake are all
+still in that budget.  The stage itself is unchanged: same five clocks of
+latency, same one BRAM, same word schedule.
 
 For scale: the whole design currently uses about 14.6 % of the XC7Z020 LUTs, so
 this stage is roughly another 1 % of the device, half a BRAM tile and one DSP.
@@ -465,3 +551,10 @@ finalise scan reads them; `stat` at every frame tag (frame N-1's values); and
 the full 256-entry map (values, monotonicity, `map[32]` still dark, white mapped
 to full scale).  Removing the forward path in a copy of the RTL makes the bench
 fail on the bin counts, which is the test that matters most here.
+
+The overlay side has its own bench, `sim/tb_hist_overlay.v`: it publishes a
+synthetic histogram through the camera-side clock, latches a panel frame, and
+compares every pixel of several scan lines against the reference model (bar
+index, relative height, the band, blank before the first
+frame and when disabled).  It also publishes a second histogram into the other bank and
+checks that the panel only sees it after the next `frame_start`.

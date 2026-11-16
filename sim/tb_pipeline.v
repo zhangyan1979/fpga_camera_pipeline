@@ -1,5 +1,5 @@
 // =============================================================================
-//  tb_pipeline.v — end-to-end self-checking testbench for the video path
+//  tb_pipeline.v 鈥?end-to-end self-checking testbench for the video path
 //
 //      camera model --> ov5640_capture --> FIFO --> fb_ddr --> FIFO
 //                        --> lcd_display --> scoreboard
@@ -405,6 +405,12 @@ module tb_pipeline;
         .rel_ack     (rel_ack),
         .video_valid (fseen_sync[1]),
         .test_pattern(1'b0),
+        .ovl_en      (1'b0),
+        .ovl_hit     (1'b0),
+        .px_x        (),
+        .px_y        (),
+        .px_active   (),
+        .frame_start (),
         .lcd_hsync   (lcd_hsync),
         .lcd_vsync   (lcd_vsync),
         .lcd_de      (lcd_de),

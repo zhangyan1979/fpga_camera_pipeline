@@ -50,6 +50,8 @@ The same pipeline at **port level** — every block's ports with direction, widt
 the net that lands on each, adjacent blocks wired, everything else joined by name:
 [`docs/camera_pipeline_ports.png`](docs/camera_pipeline_ports.png) (vector:
 [`.svg`](docs/camera_pipeline_ports.svg), `tools/make_port_sheet.py`).
+(Both sheets are hand-laid-out from the block structure; they predate
+`u_hist_overlay`, which sits between `u_lcd_display` and the panel pins.)
 
 The PS is not in the video path.  It only
 
@@ -157,6 +159,28 @@ parallel, one selected at a time:
 | 3 | `stage_hist` | pass-through + histogram, equalise, auto-exposure report | 99th percentile, mean, saturated %, strength applied |
 | 4 | `stage_seg` | four chroma boxes, paint or pass through | label count, label-0 box width / height / centre |
 
+While slot 3 is selected the panel draws the histogram the stage is measuring
+over the picture: 256 green bars in a band at the bottom of the screen, log
+height relative to the frame's peak bin (20 pixels per octave, peak fills the
+band) ([`rtl/hist_overlay.v`](rtl/hist_overlay.v), preview:
+[`docs/frame_hist_overlay.png`](docs/frame_hist_overlay.png)).  The block is a
+**mask**, not a colour: inside a bar the panel keeps the pixel's red and blue and
+saturates its green channel, so the picture stays visible and tinted rather than
+being replaced (an arithmetic 50 % blend came out olive over this warm, dim
+scene).  The bars are one camera frame old — the same convention as the stage
+statistics — and the mean / 99th percentile stay on the console in `stat`, where
+they are easier to read than marker lines drawn over the bars.  Push `s` to
+`histogram` and `k` to mode 1, then sweep the strength with `+`/`-` and watch the
+bars move while the equalised picture changes.
+
+![histogram overlay](docs/frame_hist_overlay.png)
+
+*The same dump as the picture at the top of this file, drawn at the panel's
+actual levels (no gain): 256 bins in the bottom band, green saturated only in
+the masked pixels so the dark scene still shows through them.
+`tools/hist_overlay_preview.py` draws this from the dump; the RTL draws the same
+pixels on the panel.*
+
 `docs/stage_contract.md` is the interface they all implement; each stage's own
 `docs/stage_<name>.md` has its encoding, its cost and its algorithm.  Cycle the
 slot with `s`, the mode with `k`, and sweep the parameter with `+`/`-` while
@@ -189,6 +213,7 @@ MMCM: VCO 1200 MHz (M = 24), CLKOUT0 /36, CLKOUT1 /50.
 | `rtl/img_geom.v` | word-stream geometry (end of line, word column, line index) regenerated on a delayed stream |
 | `rtl/stage_*.v` | the four processing stages in the slot: LUT point ops, 3×3 window, histogram/auto-exposure, colour segmentation |
 | `rtl/lcd_display.v` | 1056×526 timing, RGB565 output, reload handshake, underrun counter |
+| `rtl/hist_overlay.v` | live histogram overlay: two-bank bin snapshot, log-height bars in a bottom band, drawn as a green-saturating mask |
 | `rtl/clk_gen.v` | MMCM 33.333 MHz + 24 MHz |
 | `rtl/ov5640_init.v`, `rtl/i2c_control.v`, `rtl/i2c_bit_shift.v`, `rtl/ov5640_init_table_rgb.v` | OV5640 SCCB bring-up: 21 ms power-up wait, 252-entry write sequence, 5 ms post-reset delay (see Provenance) |
 | `rtl/sii9022_init.v`, `rtl/sii9022_init_table.v` | HDMI transmitter set-up on the PL I2C bus (write-only, 8-bit register address) |
@@ -203,6 +228,7 @@ MMCM: VCO 1200 MHz (M = 24), CLKOUT0 /36, CLKOUT1 /50.
 | `ps/app/main.c` | status console and key commands |
 | `sim/tb_pipeline.v` | self-checking end-to-end video test (reduced geometry + AXI memory model) |
 | `sim/tb_stage_contract.v` | stage slot: tags and word counts through a stage, hand-over between stages, warm-up gating, statistic transfer |
+| `sim/tb_hist_overlay.v` | histogram overlay: bar index and height, blank before the first frame, bank switch |
 | `sim/tb_lcd_timing.v` | full-size panel timing check |
 | `sim/tb_sccb.v` | SCCB write-path check: byte sequence, ACK/NACK, delay, SCL rate |
 | `sim/tb_init_seq.v` | register-load check: every byte of both ROM sequences compared with the table |
@@ -211,10 +237,12 @@ MMCM: VCO 1200 MHz (M = 24), CLKOUT0 /36, CLKOUT1 /50.
 | `tools/serial_send.ps1`, `tools/serial_capture.ps1` | drive / record the console |
 | `tools/verify.ps1` | hardware self-check: live-frame and freeze tests |
 | `tools/frame_stats.py` | frame-dump statistics (mean, dark fraction, row variation, A/B compare) |
+| `tools/hist_overlay_preview.py` | draws the histogram overlay onto a frame dump: what the panel will show |
 | `tools/make_schematic.py` | draws the module schematic (SVG + PNG) from the block structure |
 | `tools/make_port_sheet.py` | draws the port-level sheet: ports, widths, directions, nets |
 | `tools/schematic.py` | Canvas + SVG and PNG backends shared by both sheets |
 | `docs/` | console transcripts and frame dumps rendered to PNG |
+| `docs/frame_hist_overlay.png` | a frame dump with the histogram overlay drawn the way the RTL draws it |
 | `docs/camera_pipeline_schematic.svg`, `.png` | module schematic: lanes, video path, CDC FIFOs, PS resources |
 | `docs/camera_pipeline_ports.svg`, `.png` | port-level sheet: every port of every block, and the nets between them |
 | `docs/stage_contract.md` | the processing-stage interface, its five invariants and the test recipe |

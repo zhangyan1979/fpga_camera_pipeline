@@ -19,6 +19,8 @@
 //    * exactly 64 words per frame and nothing before the first tag,
 //    * the statistic of frame N-1 at the tag of frame N,
 //    * the completed histogram bin counts (captured during the finalise scan),
+//    * the same 256 bins published to the display-side snapshot RAM, and the
+//      bank flip that makes them visible,
 //    * the 256-entry equalisation map: value, monotonicity, dark stays dark.
 // =============================================================================
 `timescale 1ns / 1ps
@@ -57,6 +59,13 @@ module tb_stage_hist;
     wire        m_valid, m_sof, m_eol;
     wire [31:0] stat;
 
+    // overlay publication: the same scan also hands every bin to the display
+    wire [ 7:0] ovl_bin;
+    wire [15:0] ovl_cnt;
+    wire        ovl_we;
+    wire        ovl_bank;
+    wire        ovl_valid;
+
     stage_hist #(
         .WORDS_PER_LINE(WPL),
         .LINES         (LINES)
@@ -73,7 +82,12 @@ module tb_stage_hist;
         .m_eol  (m_eol),
         .param  (param),
         .knob   (knob),
-        .stat   (stat)
+        .stat   (stat),
+        .ovl_bin(ovl_bin),
+        .ovl_cnt(ovl_cnt),
+        .ovl_we (ovl_we),
+        .ovl_bank(ovl_bank),
+        .ovl_valid(ovl_valid)
     );
 
     // =========================================================================
@@ -281,6 +295,53 @@ module tb_stage_hist;
         end
     endtask
 
+    // the overlay snapshot: the same finalise scan publishes each bin
+    integer    ovl_writes = 0;
+    reg [15:0] ovl_cap [0:255];
+
+    always @(negedge clk) begin
+        if (ovl_we) begin
+            ovl_cap[ovl_bin] = ovl_cnt;
+            ovl_writes       = ovl_writes + 1;
+        end
+    end
+
+    task check_publish;
+        input integer which;
+        input [7:0]   bank_exp;
+        integer i;
+        reg [15:0] e;
+        begin
+            if (ovl_writes != 256) begin
+                fail("overlay publish count");
+                $display("      published %0d bins, expected 256", ovl_writes);
+            end
+            for (i = 0; i < 256; i = i + 1) begin
+                e = 16'd0;
+                if (which == 0) begin
+                    if (i == 32)       e = 16'd64;
+                    else if (i == 128) e = 16'd128;
+                    else if (i == 224) e = 16'd64;
+                end else begin
+                    if (i == 32)       e = 16'd64;
+                    else if (i == 200) e = 16'd128;
+                    else if (i == 250) e = 16'd64;
+                end
+                if (ovl_cap[i] !== e) begin
+                    fail("overlay published count");
+                    $display("      published bin %0d = %0d expected %0d",
+                             i, ovl_cap[i], e);
+                end
+            end
+            if (ovl_bank !== bank_exp) begin
+                fail("overlay bank");
+                $display("      bank %0d expected %0d", ovl_bank, bank_exp);
+            end
+            if (ovl_valid !== 1'b1)    fail("overlay valid not set");
+            ovl_writes = 0;
+        end
+    endtask
+
     // =========================================================================
     //  Output monitor
     // =========================================================================
@@ -371,6 +432,8 @@ module tb_stage_hist;
         rst_n = 1'b1;
         // the post-reset histogram clear takes 256 clocks
         repeat (320) @(negedge clk);
+        if (ovl_valid !== 1'b0) fail("overlay valid set before any frame");
+        if (ovl_writes != 0)    fail("overlay published before any frame");
 
         // ---- frame 0: pass-through, only the histogram runs ------------------
         knob  = 8'd0;
@@ -380,6 +443,7 @@ module tb_stage_hist;
         check_stat(32'h0000_80E0);
         check_hist(0);
         check_map(0, 255);
+        check_publish(0, 1'b1);
 
         // ---- frame 1: equalisation with frame 0's histogram ------------------
         knob  = 8'd1;
@@ -389,6 +453,7 @@ module tb_stage_hist;
         check_stat(32'hFF00_80E0);
         check_hist(0);
         check_map(0, 255);
+        check_publish(0, 1'b0);
 
         // ---- frame 2: auto-exposure reporting, pass-through ------------------
         knob  = 8'd2;
@@ -398,6 +463,7 @@ module tb_stage_hist;
         check_stat(32'h0019_AAFA);      // sat 25 %, mean 170, p99 250
         check_hist(1);
         check_map(1, 252);
+        check_publish(1, 1'b1);
 
         repeat (30) @(negedge clk);
 

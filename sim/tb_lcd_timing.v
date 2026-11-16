@@ -1,5 +1,5 @@
 // =============================================================================
-//  tb_lcd_timing.v — full-size 800x480 panel timing check
+//  tb_lcd_timing.v 鈥?full-size 800x480 panel timing check
 //
 //  Verifies the numbers the panel needs, at the real pixel clock rate:
 //      1056 x 526 clocks per frame (60.0 Hz at 33.333 MHz)
@@ -37,6 +37,10 @@ module tb_lcd_timing;
     reg  rel_ack = 1'b0;
     wire rel_req;
 
+    // overlay mask, driven by the tint check at the end
+    reg  ovl_en  = 1'b0;
+    reg  ovl_hit = 1'b0;
+
     // the "DDR side" acks the reload and refills; the drain finishes because
     // the FIFO reports empty while the reload is in progress
     always @(posedge pix_clk or negedge rst_n) begin
@@ -67,6 +71,12 @@ module tb_lcd_timing;
         .rel_ack     (rel_ack),
         .video_valid (1'b1),
         .test_pattern(1'b0),
+        .ovl_en      (ovl_en),
+        .ovl_hit     (ovl_hit),
+        .px_x        (),
+        .px_y        (),
+        .px_active   (),
+        .frame_start (),
         .lcd_hsync   (lcd_hsync),
         .lcd_vsync   (lcd_vsync),
         .lcd_de      (lcd_de),
@@ -164,8 +174,45 @@ module tb_lcd_timing;
             end
         end
     end
+    // ---- overlay mask: R and B survive, the green channel saturates ----------
+    // Run after the timing measurements, in the middle of an active line, so it
+    // cannot disturb the first-line pixel-order check.
+    task check_overlay_tint;
+        integer i, checked;
+        reg [15:0] p;
+        begin
+            while (!dut.lcd_de) @(negedge pix_clk);
+            repeat (H_TOTAL) @(negedge pix_clk);
+
+            checked = 0;
+            ovl_en  = 1'b1;
+            ovl_hit = 1'b1;
+            for (i = 0; (i < 64) && (checked < 8); i = i + 1) begin
+                @(negedge pix_clk);
+                p = dut.px_next;
+                @(posedge pix_clk); #1;
+                if (dut.lcd_de) begin
+                    checked = checked + 1;
+                    if (lcd_rgb !== {p[15:11], 6'h3F, p[4:0]}) begin
+                        $display("FAIL: overlay tint %h -> %h", p, lcd_rgb);
+                        errors = errors + 1;
+                    end
+                end
+            end
+            ovl_en  = 1'b0;
+            ovl_hit = 1'b0;
+
+            $display("  overlay tint: %0d pixels checked", checked);
+            if (checked < 8) begin
+                $display("FAIL: overlay tint check saw no active pixels");
+                errors = errors + 1;
+            end
+        end
+    endtask
+
     initial begin
         #(H_TOTAL * V_TOTAL * 30 * 5);    // five frames
+        check_overlay_tint;
         if (frame_no >= 3 && errors == 0)
             $display("TEST PASS: %0d x %0d @ 33.333 MHz = %0.2f Hz, %0d frames, no underrun (%0d)",
                      H_TOTAL, V_TOTAL, 33.333e6 / (H_TOTAL * V_TOTAL), frames, underruns);

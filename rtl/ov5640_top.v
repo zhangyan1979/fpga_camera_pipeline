@@ -31,6 +31,13 @@
 //  keep (96 000 words per frame, 200 words per line, the frame tag delayed with
 //  the data).
 //
+//  While the histogram slot is selected (ctrl[4:2] = 3) the panel also draws
+//  that stage's 256-bin luminance histogram over the picture: a mask that
+//  saturates the green channel of the pixels inside the bars, in a band at the
+//  bottom, log height relative to the frame's peak (rtl/hist_overlay.v).  The
+//  histogram is one camera frame old, the same convention as the stage
+//  statistics.
+//
 //  The 16-bit panel value is {R[4:0], G[5:0], B[4:0]} straight onto the TFT RGB
 //  pins, which the SiI9022A (same pins) also converts to HDMI.
 // =============================================================================
@@ -305,6 +312,13 @@ module ov5640_top #(
     wire        hist_eol;
     wire [31:0] hist_stat;
 
+    // published histogram, for the panel overlay (see rtl/hist_overlay.v)
+    wire [ 7:0] hist_ovl_bin;
+    wire [15:0] hist_ovl_cnt;
+    wire        hist_ovl_we;
+    wire        hist_ovl_bank;
+    wire        hist_ovl_valid;
+
     stage_hist #(
         .WORDS_PER_LINE(WORDS_PER_LINE),
         .LINES         (V_ACTIVE)
@@ -321,7 +335,12 @@ module ov5640_top #(
         .m_eol  (hist_eol),
         .param  (stage_param),
         .knob   (stage_knob),
-        .stat   (hist_stat)
+        .stat   (hist_stat),
+        .ovl_bin      (hist_ovl_bin),
+        .ovl_cnt      (hist_ovl_cnt),
+        .ovl_we       (hist_ovl_we),
+        .ovl_bank     (hist_ovl_bank),
+        .ovl_valid    (hist_ovl_valid)
     );
 
     // ---- slot 4: colour segmentation + bounding boxes (sel = 4) ------------
@@ -522,6 +541,49 @@ module ov5640_top #(
     wire video_valid = fseen_sync[1];
 
     // =========================================================================
+    //  Histogram overlay: slot 3's histogram drawn over the picture
+    // =========================================================================
+    // The histogram stage runs all the time, whichever slot is selected, so its
+    // published bins are always current; the overlay is drawn while the
+    // histogram slot drives the picture (ctrl[4:2] = 3) and the camera image is
+    // showing.  ctrl has no spare bit, so the slot itself is the switch.
+    reg [1:0] ovl_en_sync;
+
+    always @(posedge clk_pix or negedge pix_rst_n) begin
+        if (!pix_rst_n) ovl_en_sync <= 2'b00;
+        else            ovl_en_sync <= {ovl_en_sync[0],
+                                        (ctrl[4:2] == 3'd3) && !ctrl[0]};
+    end
+    wire ovl_en = ovl_en_sync[1];
+
+    wire [10:0] panel_x;
+    wire [ 9:0] panel_y;
+    wire        panel_active;
+    wire        panel_fs;
+    wire        ovl_hit;
+
+    hist_overlay #(
+        .H_ACTIVE(H_ACTIVE),
+        .V_ACTIVE(V_ACTIVE)
+    ) u_hist_overlay (
+        .pix_clk    (clk_pix),
+        .pix_rst_n  (pix_rst_n),
+        .frame_start(panel_fs),
+        .x          (panel_x),
+        .y          (panel_y),
+        .in_active  (panel_active),
+        .enable     (ovl_en),
+        .ovl_hit    (ovl_hit),
+        .wr_clk     (cam_pclk),
+        .wr_rst_n   (cam_rst_n),
+        .wr_en      (hist_ovl_we),
+        .wr_bank    (hist_ovl_bank),
+        .wr_bin     (hist_ovl_bin),
+        .wr_cnt     (hist_ovl_cnt),
+        .wr_valid   (hist_ovl_valid)
+    );
+
+    // =========================================================================
     //  Panel
     // =========================================================================
     wire [15:0] disp_frames;
@@ -540,6 +602,12 @@ module ov5640_top #(
         .rel_ack     (rel_ack),
         .video_valid (video_valid),
         .test_pattern(test_pattern),
+        .ovl_en      (ovl_en),
+        .ovl_hit     (ovl_hit),
+        .px_x        (panel_x),
+        .px_y        (panel_y),
+        .px_active   (panel_active),
+        .frame_start (panel_fs),
         .lcd_hsync   (lcd_hsync),
         .lcd_vsync   (lcd_vsync),
         .lcd_de      (lcd_de),

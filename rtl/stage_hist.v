@@ -14,6 +14,12 @@
 //  accumulated while the map and the statistics of frame N-1 are the ones in
 //  use, so no consumer ever sees a half-built histogram.
 //
+//  The same scan publishes each (bin, count) pair to a display-side snapshot
+//  RAM (hist_overlay.v), which is how the panel draws a live histogram overlay
+//  without a second read port on the histogram BRAM.  The published bank flips
+//  only when a scan completes, so an aborted finalise leaves the last complete
+//  histogram on screen.
+//
 //  knob[2:0] / param and the stat layout are documented in
 //  docs/stage_hist.md, together with the luminance formula and the estimates.
 // =============================================================================
@@ -39,7 +45,16 @@ module stage_hist #(
     input  wire [15:0] param,           // mode 1: strength, mode 2: target level
     input  wire [ 7:0] knob,            // [2:0] mode
     // ---- statistic of the frame just finished -------------------------------
-    output wire [31:0] stat
+    output wire [31:0] stat,
+    // ---- histogram snapshot for the panel overlay ---------------------------
+    //  The finalise scan already reads every bin with its count; here it also
+    //  publishes that (bin, count) pair, so a display-side RAM can hold a
+    //  complete copy.  This is the only moment a completed count exists.
+    output reg  [ 7:0] ovl_bin,         // bin being published this cycle
+    output reg  [15:0] ovl_cnt,         // its completed count
+    output reg         ovl_we,          // one pulse per bin per completed scan
+    output reg         ovl_bank,        // bank the next scan fills
+    output reg         ovl_valid        // at least one scan has completed
 );
 
     // =========================================================================
@@ -204,6 +219,10 @@ module stage_hist #(
         hist_wa = 8'd0;
         hist_wd = 16'd0;
 
+        ovl_we  = 1'b0;
+        ovl_bin = 8'd0;
+        ovl_cnt = 16'd0;
+
         if (proc && (ph_now <= 3'd3)) begin
             hist_ra = y_now;
         end else if (state == S_SCAN) begin
@@ -218,6 +237,11 @@ module stage_hist #(
             hist_we = 1'b1;
             hist_wa = fin_bin;          // clear the bin just read
             hist_wd = 16'd0;
+            // the count read this cycle is the completed one for this bin:
+            // publish it to the display-side snapshot RAM
+            ovl_we  = 1'b1;
+            ovl_bin = fin_bin;
+            ovl_cnt = hist_q;
         end else if (state == S_CLEAR) begin
             hist_we = 1'b1;
             hist_wa = clr_cnt[7:0];
@@ -326,6 +350,26 @@ module stage_hist #(
     always @(posedge clk) begin
         if ((state == S_SCAN) && (fin_cnt != 9'd0))
             map_ram[fin_bin] <= map_val;
+    end
+
+    // =========================================================================
+    //  Snapshot publication: flip banks only when a scan completes
+    // =========================================================================
+    // The display reads the bank that is *not* being filled, so a partial scan
+    // (a frame tag that aborts the finalise) publishes nothing: the overlay
+    // keeps showing the previous completed frame instead of a half-written
+    // histogram.  The flip happens on the same edge as the last bin's write, so
+    // that write still lands in the old bank.
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            ovl_bank  <= 1'b0;
+            ovl_valid <= 1'b0;
+        end else begin
+            if ((state == S_SCAN) && (fin_cnt == 9'd256) && !accept) begin
+                ovl_bank  <= ~ovl_bank;
+                ovl_valid <= 1'b1;
+            end
+        end
     end
 
     // =========================================================================
