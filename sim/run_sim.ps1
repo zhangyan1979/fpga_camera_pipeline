@@ -8,6 +8,9 @@
 #  compiled against the whole RTL tree minus the top level and the MMCM wrapper,
 #  which need Xilinx primitives.  A run fails if a testbench does not reach a
 #  "TEST PASS" line, so a stale snapshot can never be mistaken for a pass.
+#
+#  Each run writes <tb_name>.wdb with log_wave (see waves_runall.tcl).  Open:
+#    xsim <tb_name>.wdb -gui
 # =============================================================================
 $ErrorActionPreference = 'Stop'
 Push-Location $PSScriptRoot
@@ -58,7 +61,8 @@ foreach ($t in $tests) {
     Invoke-Tool xvlog.bat $files
     Invoke-Tool xelab.bat @('-debug', 'typical', $t.name, '-s', $t.name)
 
-    $out = & xsim.bat $t.name -runall 2>&1
+    $wdb = $t.name + '.wdb'
+    $out = & xsim.bat $t.name -wdb $wdb -tclbatch waves_runall.tcl 2>&1
     $out | Select-String -Pattern 'capture:|DDR buffer|displayed frames|ddr words|underrun|frame [0-9]:|SCCB|write:|NACK|dly_max|camera:|hdmi:|words out|before first|largest|last stat|stage param|FAIL|TEST' |
         ForEach-Object { $_.Line }
 
