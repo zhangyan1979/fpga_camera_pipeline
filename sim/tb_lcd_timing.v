@@ -38,8 +38,10 @@ module tb_lcd_timing;
     wire rel_req;
 
     // overlay mask, driven by the tint check at the end
-    reg  ovl_en  = 1'b0;
-    reg  ovl_hit = 1'b0;
+    reg         ovl_en   = 1'b0;
+    reg         ovl_hit  = 1'b0;
+    reg         menu_hit = 1'b0;
+    reg  [15:0] menu_rgb = 16'd0;
 
     // the "DDR side" acks the reload and refills; the drain finishes because
     // the FIFO reports empty while the reload is in progress
@@ -73,6 +75,8 @@ module tb_lcd_timing;
         .test_pattern(1'b0),
         .ovl_en      (ovl_en),
         .ovl_hit     (ovl_hit),
+        .menu_hit    (menu_hit),
+        .menu_rgb    (menu_rgb),
         .px_x        (),
         .px_y        (),
         .px_active   (),
@@ -199,8 +203,17 @@ module tb_lcd_timing;
                     end
                 end
             end
-            ovl_en  = 1'b0;
-            ovl_hit = 1'b0;
+            menu_hit = 1'b1;
+            menu_rgb = 16'hABCD;
+            while (!dut.lcd_de) @(negedge pix_clk);
+            @(posedge pix_clk); #1;
+            if (!dut.lcd_de || lcd_rgb !== 16'hABCD) begin
+                $display("FAIL: menu pixel %h while de=%b", lcd_rgb, dut.lcd_de);
+                errors = errors + 1;
+            end
+            menu_hit = 1'b0;
+            ovl_en   = 1'b0;
+            ovl_hit  = 1'b0;
 
             $display("  overlay tint: %0d pixels checked", checked);
             if (checked < 8) begin

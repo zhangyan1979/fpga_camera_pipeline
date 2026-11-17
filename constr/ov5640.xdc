@@ -83,6 +83,11 @@ create_clock -name camera_pclk -period 23.810 [get_ports camera_pclk]
 set_clock_groups -asynchronous -group [get_clocks camera_pclk]
 
 # ---- HDMI transmitter I2C (PL I2C bus, SiI9022A) -----------------------------
+# GT911 reset.  The touch controller itself is on PS I2C0 (MIO50/51).
+set_property PACKAGE_PIN F19 [get_ports tp_rst]
+set_property IOSTANDARD  LVCMOS33 [get_ports tp_rst]
+set_false_path -to [get_ports tp_rst]
+
 set_property PACKAGE_PIN T10 [get_ports hdmi_sclk]
 set_property PACKAGE_PIN R14 [get_ports hdmi_sdat]
 set_property IOSTANDARD  LVCMOS33 [get_ports {hdmi_sclk hdmi_sdat}]

@@ -27,6 +27,19 @@ set_property -dict [list \
     CONFIG.PCW_USE_M_AXI_GP0 {1} \
     CONFIG.PCW_USE_S_AXI_HP0 {1} \
     CONFIG.PCW_S_AXI_HP0_DATA_WIDTH {64} \
+    CONFIG.PCW_I2C0_PERIPHERAL_ENABLE {1} \
+    CONFIG.PCW_I2C0_I2C0_IO {MIO 50 .. 51} \
+    CONFIG.PCW_I2C0_GRP_INT_ENABLE {0} \
+    CONFIG.PCW_MIO_50_DIRECTION {inout} \
+    CONFIG.PCW_MIO_50_PULLUP {enabled} \
+    CONFIG.PCW_MIO_50_IOTYPE {LVCMOS 1.8V} \
+    CONFIG.PCW_MIO_51_DIRECTION {inout} \
+    CONFIG.PCW_MIO_51_PULLUP {enabled} \
+    CONFIG.PCW_MIO_51_IOTYPE {LVCMOS 1.8V} \
+    CONFIG.PCW_GPIO_MIO_GPIO_ENABLE {1} \
+    CONFIG.PCW_MIO_0_DIRECTION {in} \
+    CONFIG.PCW_MIO_0_PULLUP {enabled} \
+    CONFIG.PCW_MIO_0_IOTYPE {LVCMOS 3.3V} \
 ] [get_bd_cells ps7]
 
 # ---- control word out, two status words in ----------------------------------
@@ -48,6 +61,11 @@ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_gpio:2.0 axi_gpio_ext
 set_property -dict [list CONFIG.C_GPIO_WIDTH {32} CONFIG.C_ALL_INPUTS {1}] \
     [get_bd_cells axi_gpio_ext]
 
+# touch reset and the menu-open bit.  [0] = TP_RST, [1] = menu on.
+create_bd_cell -type ip -vlnv xilinx.com:ip:axi_gpio:2.0 axi_gpio_ui
+set_property -dict [list CONFIG.C_GPIO_WIDTH {8} CONFIG.C_ALL_OUTPUTS {1}] \
+    [get_bd_cells axi_gpio_ui]
+
 # ---- PL half ----------------------------------------------------------------
 create_bd_cell -type module -reference ov5640_top cam_top_0
 
@@ -62,11 +80,12 @@ connect_bd_net [get_bd_pins ps7/FCLK_RESET0_N] [get_bd_pins rst_50m/ext_reset_in
 
 # ---- AXI-Lite: GP0 -> the two GPIOs -----------------------------------------
 create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smc_lite
-set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {3}] [get_bd_cells smc_lite]
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {4}] [get_bd_cells smc_lite]
 connect_bd_intf_net [get_bd_intf_pins ps7/M_AXI_GP0]    [get_bd_intf_pins smc_lite/S00_AXI]
 connect_bd_intf_net [get_bd_intf_pins smc_lite/M00_AXI] [get_bd_intf_pins axi_gpio_ctrl/S_AXI]
 connect_bd_intf_net [get_bd_intf_pins smc_lite/M01_AXI] [get_bd_intf_pins axi_gpio_status/S_AXI]
 connect_bd_intf_net [get_bd_intf_pins smc_lite/M02_AXI] [get_bd_intf_pins axi_gpio_ext/S_AXI]
+connect_bd_intf_net [get_bd_intf_pins smc_lite/M03_AXI] [get_bd_intf_pins axi_gpio_ui/S_AXI]
 
 # ---- AXI4 master (camera frame buffer engine) -> S_AXI_HP0 ------------------
 create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smc_hp
@@ -77,12 +96,12 @@ connect_bd_intf_net [get_bd_intf_pins smc_hp/M00_AXI]  [get_bd_intf_pins ps7/S_A
 # ---- 50 MHz domain wiring ---------------------------------------------------
 foreach p {ps7/M_AXI_GP0_ACLK ps7/S_AXI_HP0_ACLK \
            axi_gpio_ctrl/s_axi_aclk axi_gpio_status/s_axi_aclk \
-           axi_gpio_ext/s_axi_aclk \
+           axi_gpio_ext/s_axi_aclk axi_gpio_ui/s_axi_aclk \
            smc_lite/aclk smc_hp/aclk cam_top_0/clk50} {
     connect_bd_net [get_bd_pins ps7/FCLK_CLK0] [get_bd_pins $p]
 }
 foreach p {axi_gpio_ctrl/s_axi_aresetn axi_gpio_status/s_axi_aresetn \
-           axi_gpio_ext/s_axi_aresetn \
+           axi_gpio_ext/s_axi_aresetn axi_gpio_ui/s_axi_aresetn \
            smc_lite/aresetn smc_hp/aresetn} {
     connect_bd_net [get_bd_pins rst_50m/peripheral_aresetn] [get_bd_pins $p]
 }
@@ -93,13 +112,14 @@ connect_bd_net [get_bd_pins axi_gpio_ctrl/gpio_io_o]  [get_bd_pins cam_top_0/ctr
 connect_bd_net [get_bd_pins cam_top_0/status_cam]     [get_bd_pins axi_gpio_status/gpio_io_i]
 connect_bd_net [get_bd_pins cam_top_0/status_disp]    [get_bd_pins axi_gpio_status/gpio2_io_i]
 connect_bd_net [get_bd_pins cam_top_0/status_ext]     [get_bd_pins axi_gpio_ext/gpio_io_i]
+connect_bd_net [get_bd_pins axi_gpio_ui/gpio_io_o]    [get_bd_pins cam_top_0/ui]
 
 assign_bd_address
 
 # ---- external pins ----------------------------------------------------------
 set ext_pins {led lcd_bl lcd_pclk lcd_de lcd_hsync lcd_vsync lcd_rgb \
               camera_pclk camera_href camera_vsync camera_xclk camera_data \
-              camera_sclk camera_sdat hdmi_sclk hdmi_sdat}
+              camera_sclk camera_sdat hdmi_sclk hdmi_sdat tp_rst}
 foreach p $ext_pins {
     make_bd_pins_external [get_bd_pins cam_top_0/$p]
 }

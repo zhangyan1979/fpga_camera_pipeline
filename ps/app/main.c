@@ -39,8 +39,13 @@
 #include "xil_types.h"
 #include "xil_printf.h"
 #include "xgpio.h"
+#include "xgpiops.h"
+#include "xiicps.h"
 #include "xuartps_hw.h"
 #include "sleep.h"
+
+#include "gt911.h"
+#include "touch_menu.h"
 
 // ---- register map -----------------------------------------------------------
 #define CTRL_PATTERN    (1u << 0)
@@ -87,6 +92,18 @@ static const char *const stage_name[NUM_STAGES] = {
 static XGpio g_ctrl;
 static XGpio g_status;
 static XGpio g_ext;
+static XGpio g_ui;
+static XGpioPs g_psgpio;
+static XIicPs g_iic;
+
+#define MIO_TP_INT 0
+
+static int tp_rst_level;
+static int menu_open;
+static int touch_hw;
+static int touch_ok;
+static int touch_addr;
+static u32 retry_ticks;
 
 static u32 ctrl_word;
 static int pattern_on;
@@ -115,7 +132,17 @@ static int gpio_init(void)
         return XST_FAILURE;
     XGpio_SetDataDirection(&g_ext, 1, 0xFFFFFFFFu);    // stage statistic
 
+    if (XGpio_Initialize(&g_ui, XPAR_AXI_GPIO_UI_DEVICE_ID) != XST_SUCCESS)
+        return XST_FAILURE;
+    XGpio_SetDataDirection(&g_ui, 1, 0x00000000u);
+
     return XST_SUCCESS;
+}
+
+static void ui_flush(void)
+{
+    u32 ui = (tp_rst_level ? 1u : 0u) | (menu_open ? 2u : 0u);
+    XGpio_DiscreteWrite(&g_ui, 1, ui);
 }
 
 static void ctrl_flush(void)
@@ -127,6 +154,120 @@ static void ctrl_flush(void)
                 ((u32)bl_duty << CTRL_BL_SHIFT) |
                 ((param & 0xFFFFu) << CTRL_PARAM_SHIFT);
     XGpio_DiscreteWrite(&g_ctrl, 1, ctrl_word);
+}
+
+static void glue_rst(int level)
+{
+    tp_rst_level = level ? 1 : 0;
+    ui_flush();
+}
+
+static void glue_int(int output, int level)
+{
+    if (output) {
+        XGpioPs_SetDirectionPin(&g_psgpio, MIO_TP_INT, 1);
+        XGpioPs_SetOutputEnablePin(&g_psgpio, MIO_TP_INT, 1);
+        XGpioPs_WritePin(&g_psgpio, MIO_TP_INT, level ? 1 : 0);
+    } else {
+        XGpioPs_SetOutputEnablePin(&g_psgpio, MIO_TP_INT, 0);
+        XGpioPs_SetDirectionPin(&g_psgpio, MIO_TP_INT, 0);
+    }
+}
+
+static int glue_wr(u8 addr7, u16 reg, const u8 *buf, int len)
+{
+    u8 tmp[20];
+    int i;
+
+    if (len > (int)sizeof(tmp) - 2)
+        return -1;
+    tmp[0] = (u8)(reg >> 8);
+    tmp[1] = (u8)(reg & 0xFF);
+    for (i = 0; i < len; i++)
+        tmp[2 + i] = buf[i];
+    while (XIicPs_BusIsBusy(&g_iic)) { }
+    return (XIicPs_MasterSendPolled(&g_iic, tmp, len + 2, addr7) == XST_SUCCESS) ? 0 : -1;
+}
+
+static int glue_rd(u8 addr7, u16 reg, u8 *buf, int len)
+{
+    u8 cmd[2];
+
+    cmd[0] = (u8)(reg >> 8);
+    cmd[1] = (u8)(reg & 0xFF);
+    if (XIicPs_MasterSendPolled(&g_iic, cmd, 2, addr7) != XST_SUCCESS)
+        return -1;
+    while (XIicPs_BusIsBusy(&g_iic)) { }
+    return (XIicPs_MasterRecvPolled(&g_iic, buf, len, addr7) == XST_SUCCESS) ? 0 : -1;
+}
+
+static void glue_delay(u32 ms)
+{
+    usleep(ms * 1000u);
+}
+
+static const gt911_glue_t g_glue = {
+    glue_rst, glue_int, glue_wr, glue_rd, glue_delay
+};
+
+static int touch_bringup(void)
+{
+    int ver = 0;
+    int downloaded = 0;
+
+    touch_addr = gt911_init(&g_glue, &ver, &downloaded);
+    if (touch_addr < 0) {
+        touch_ok = 0;
+        return 0;
+    }
+    touch_ok = 1;
+    xil_printf("GT911 at 0x%02x, config 0x%02x, table %s\r\n",
+               touch_addr, ver, downloaded ? "downloaded" : "kept");
+    return 1;
+}
+
+static void touch_poll(void)
+{
+    gt911_point_t pt;
+    int n = 0;
+    int down = 0;
+    int acted;
+
+    if (!touch_hw)
+        return;
+
+    if (!touch_ok) {
+        if (retry_ticks < 200)
+            retry_ticks++;
+        else {
+            retry_ticks = 0;
+            if (!touch_bringup())
+                xil_printf("touch: no GT911, console keys still work\r\n");
+        }
+        return;
+    }
+
+    n = gt911_poll(&g_glue, (u8)touch_addr, &pt, 1);
+    if (n < 0) {
+        touch_ok = 0;
+        retry_ticks = 0;
+        xil_printf("touch: bus error, will retry\r\n");
+        return;
+    }
+    if (n > 0 && (pt.x >= 800 || pt.y >= 480))
+        return;
+    if (n > 0)
+        down = 1;
+
+    acted = touch_menu_step(down, down ? pt.x : 0, down ? pt.y : 0,
+                            &stage, &knob, &param, &menu_open);
+    if (acted) {
+        ctrl_flush();
+        ui_flush();
+        xil_printf("touch: %s k=%u p=0x%04X menu=%d\r\n",
+                   stage_name[stage & 7u], (unsigned)knob,
+                   (unsigned)param, menu_open);
+    }
 }
 
 static u32 status_cam(void)  { return XGpio_DiscreteRead(&g_status, 1); }
@@ -144,7 +285,8 @@ static void print_help(void)
     xil_printf("  + - stage parameter up / down\r\n");
     xil_printf("  b   cycle the backlight (100/60/30/10 %%)\r\n");
     xil_printf("  i   print the control and status words\r\n");
-    xil_printf("  h   this help\r\n\r\n");
+    xil_printf("  h   this help\r\n");
+    xil_printf("  touch the tab on the right edge to open the same controls\r\n\r\n");
 }
 
 static void print_status(void)
@@ -282,9 +424,33 @@ int main(void)
     stage = 0;
     knob = 0;
     param = 0;
+    menu_open = 0;
+    tp_rst_level = 0;
+    touch_ok = 0;
+    touch_addr = -1;
+    retry_ticks = 0;
+    touch_menu_reset();
     ctrl_flush();
+    ui_flush();
 
     print_help();
+
+    {
+        XGpioPs_Config *pscfg = XGpioPs_LookupConfig(XPAR_XGPIOPS_0_DEVICE_ID);
+        XIicPs_Config *icfg = XIicPs_LookupConfig(XPAR_XIICPS_0_DEVICE_ID);
+
+        if (pscfg == NULL ||
+            XGpioPs_CfgInitialize(&g_psgpio, pscfg, pscfg->BaseAddr) != XST_SUCCESS ||
+            icfg == NULL ||
+            XIicPs_CfgInitialize(&g_iic, icfg, icfg->BaseAddress) != XST_SUCCESS) {
+            xil_printf("WARNING: touch pins are not in this design\r\n");
+        } else {
+            touch_hw = 1;
+            XIicPs_SetSClk(&g_iic, 400000);
+            if (!touch_bringup())
+                xil_printf("touch: no GT911, console keys still work\r\n");
+        }
+    }
 
     // wait for the camera registers to be programmed (the PL does the I2C)
     {
@@ -304,6 +470,7 @@ int main(void)
         tick++;
 
         console_poll();
+        touch_poll();
 
         if ((tick % 100) == 0)          // once per second
             print_status();

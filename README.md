@@ -88,6 +88,15 @@ cam init=1 live=1 fps=30 frames=67 | panel frames=141 underruns=0 errs=0 | bl=10
 | `i` | dump the control and status words, resolution and buffer addresses |
 | `h` | help |
 
+The same three controls are on the panel. A tab on the right edge (`x = 776..799`,
+`y = 200..279`) opens a menu over the right side of the picture. It lists the five
+populated stages, the mode numbers that stage actually implements, and `−` / `+` for the parameter (step 1,
+repeating while the finger stays on the button). Tap the title, tap the picture to
+the left of the menu, or leave it for 4 seconds and it closes. The serial keys keep
+working either way. The GT911 sits on PS I2C0 (MIO50/51), the same wiring as
+`touch_test`; the PL only drives `TP_RST` on F19 and paints the menu. If the
+controller does not answer, the picture and the console are unchanged.
+
 ## Frame buffers
 
 | Buffer | Address | Size |
@@ -214,6 +223,7 @@ MMCM: VCO 1200 MHz (M = 24), CLKOUT0 /36, CLKOUT1 /50.
 | `rtl/stage_*.v` | the four processing stages in the slot: LUT point ops, 3×3 window, histogram/auto-exposure, colour segmentation |
 | `rtl/lcd_display.v` | 1056×526 timing, RGB565 output, reload handshake, underrun counter |
 | `rtl/hist_overlay.v` | live histogram overlay: two-bank bin snapshot, log-height bars in a bottom band, drawn as a green-saturating mask |
+| `rtl/menu_overlay.v` | right-edge tab and the popup stage / mode / parameter panel |
 | `rtl/clk_gen.v` | MMCM 33.333 MHz + 24 MHz |
 | `rtl/ov5640_init.v`, `rtl/i2c_control.v`, `rtl/i2c_bit_shift.v`, `rtl/ov5640_init_table_rgb.v` | OV5640 SCCB bring-up: 21 ms power-up wait, 252-entry write sequence, 5 ms post-reset delay (see Provenance) |
 | `rtl/sii9022_init.v`, `rtl/sii9022_init_table.v` | HDMI transmitter set-up on the PL I2C bus (write-only, 8-bit register address) |

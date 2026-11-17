@@ -52,6 +52,8 @@ module ov5640_top #(
     input  wire        clk50,           // PS FCLK0, 50 MHz
     input  wire        aresetn,         // PS FCLK_RESET0_N
     input  wire [31:0] ctrl,            // AXI GPIO from the PS
+    input  wire [ 7:0] ui,             // [0] TP_RST level, [1] menu open
+    output wire        tp_rst,
     output wire [31:0] status_cam,
     output wire [31:0] status_disp,
     output wire [31:0] status_ext,      // statistic of the selected stage
@@ -118,6 +120,9 @@ module ov5640_top #(
 );
 
     localparam [26:0] HDMI_DELAY = 27'd50_000_000;   // 1 s at 50 MHz
+
+    // TP_RST is a slow GPIO level.  The menu bit is consumed in the pixel domain.
+    assign tp_rst = ui[0];
 
     // one word carries four pixels, so a line is H_ACTIVE / 4 words
     localparam integer WORDS_PER_LINE = H_ACTIVE / 4;
@@ -556,6 +561,15 @@ module ov5640_top #(
     end
     wire ovl_en = ovl_en_sync[1];
 
+    // Menu controls cross from the AXI clock into the pixel clock.  Each bit is
+    // synchronised, then the whole set is latched at the start of blanking so
+    // a label cannot change in the middle of a frame.
+    reg [31:0] ctrl_ff0, ctrl_ff1;
+    reg        menu_ff0, menu_ff1;
+    reg        menu_l;
+    reg [ 2:0] stage_l, knob_l;
+    reg [15:0] param_l;
+
     wire [10:0] panel_x;
     wire [ 9:0] panel_y;
     wire        panel_active;
@@ -583,6 +597,45 @@ module ov5640_top #(
         .wr_valid   (hist_ovl_valid)
     );
 
+    wire        menu_hit;
+    wire [15:0] menu_rgb;
+
+    always @(posedge clk_pix or negedge pix_rst_n) begin
+        if (!pix_rst_n) begin
+            ctrl_ff0 <= 32'd0;
+            ctrl_ff1 <= 32'd0;
+            menu_ff0 <= 1'b0;
+            menu_ff1 <= 1'b0;
+            menu_l   <= 1'b0;
+            stage_l  <= 3'd0;
+            knob_l   <= 3'd0;
+            param_l  <= 16'd0;
+        end else begin
+            ctrl_ff0 <= ctrl;
+            ctrl_ff1 <= ctrl_ff0;
+            menu_ff0 <= ui[1];
+            menu_ff1 <= menu_ff0;
+            if (panel_fs) begin
+                menu_l  <= menu_ff1;
+                stage_l <= ctrl_ff1[4:2];
+                knob_l  <= ctrl_ff1[7:5];
+                param_l <= ctrl_ff1[31:16];
+            end
+        end
+    end
+
+    menu_overlay u_menu (
+        .x         (panel_x),
+        .y         (panel_y),
+        .in_active (panel_active),
+        .menu_on   (menu_l),
+        .stage     (stage_l),
+        .knob      (knob_l),
+        .param     (param_l),
+        .menu_hit  (menu_hit),
+        .menu_rgb  (menu_rgb)
+    );
+
     // =========================================================================
     //  Panel
     // =========================================================================
@@ -604,6 +657,8 @@ module ov5640_top #(
         .test_pattern(test_pattern),
         .ovl_en      (ovl_en),
         .ovl_hit     (ovl_hit),
+        .menu_hit    (menu_hit),
+        .menu_rgb    (menu_rgb),
         .px_x        (panel_x),
         .px_y        (panel_y),
         .px_active   (panel_active),

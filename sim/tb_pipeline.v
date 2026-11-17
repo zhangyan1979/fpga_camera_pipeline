@@ -407,6 +407,8 @@ module tb_pipeline;
         .test_pattern(1'b0),
         .ovl_en      (1'b0),
         .ovl_hit     (1'b0),
+        .menu_hit    (1'b0),
+        .menu_rgb    (16'd0),
         .px_x        (),
         .px_y        (),
         .px_active   (),

@@ -53,6 +53,9 @@ module lcd_display #(
     // histogram overlay, computed outside this block from px_x / px_y
     input  wire        ovl_en,
     input  wire        ovl_hit,
+    // menu overlay replaces the pixel where it draws; it wins over the tint
+    input  wire        menu_hit,
+    input  wire [15:0] menu_rgb,
     // panel position, for the overlay generator
     output wire [10:0] px_x,
     output wire [ 9:0] px_y,
@@ -227,9 +230,14 @@ module lcd_display #(
                 end
             end
 
-            // overlay mask: keep the pixel's red and blue, saturate its green
-            // channel, so the bar tints the picture instead of replacing it
-            lcd_rgb <= ovl_draw ? {px_next[15:11], 6'h3F, px_next[4:0]} : px_next;
+            // menu pixels replace the picture.  The histogram tint keeps red
+            // and blue and saturates green, and only where the menu is not drawn.
+            if (menu_hit)
+                lcd_rgb <= menu_rgb;
+            else if (ovl_draw)
+                lcd_rgb <= {px_next[15:11], 6'h3F, px_next[4:0]};
+            else
+                lcd_rgb <= px_next;
 
             // underrun bookkeeping: count the frames that should have been
             // complete but had a missing pixel

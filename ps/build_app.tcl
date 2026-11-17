@@ -18,7 +18,7 @@ createhw  -name hw  -hwspec [file join $here camera_pipeline.xsa]
 createbsp -name bsp -hw hw -proc ps7_cortexa9_0
 createapp -name camera_pipeline -hw hw -bsp bsp -proc ps7_cortexa9_0 -app "Empty Application"
 
-foreach f {main.c} {
+foreach f {main.c menu.c menu.h menu_geom.h touch_menu.c touch_menu.h gt911.c gt911.h gt911_cfg_acz702.h} {
     file copy -force [file join $here app $f] \
                      [file join $here vitis_ws camera_pipeline src $f]
 }
